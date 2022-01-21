@@ -126,7 +126,7 @@ recover_semi_durable_route_txn(R = #route{binding = B}, X) ->
               case mnesia:read(rabbit_semi_durable_route, B, read) of
                   [] -> no_recover;
                   _  -> ok = sync_transient_route(R, should_index_table(X), fun mnesia:write/3),
-                        rabbit_exchange:serial(X)
+                        rabbit_exchange:serial_in_mnesia(X)
               end
       end,
       fun (no_recover, _)     -> ok;
@@ -182,7 +182,7 @@ add(Src, Dst, B, ActingUser) ->
     ok = sync_route(#route{binding = B}, durable(Src), durable(Dst),
                     should_index_table(Src), fun mnesia:write/3),
     x_callback(transaction, Src, add_binding, B),
-    Serial = rabbit_exchange:serial(Src),
+    Serial = rabbit_exchange:serial_in_mnesia(Src),
     fun () ->
         x_callback(Serial, Src, add_binding, B),
         ok = rabbit_event:notify(
@@ -715,7 +715,7 @@ process_deletions(Deletions, ActingUser) ->
                      (_XName, {X, not_deleted, Bindings}) ->
                          Bs = lists:flatten(Bindings),
                          x_callback(transaction, X, remove_bindings, Bs),
-                         {X, not_deleted, Bs, rabbit_exchange:serial(X)}
+                         {X, not_deleted, Bs, rabbit_exchange:serial_in_mnesia(X)}
                  end, Deletions),
     fun() ->
             dict:fold(fun (XName, {X, deleted, Bs, Serial}, ok) ->
