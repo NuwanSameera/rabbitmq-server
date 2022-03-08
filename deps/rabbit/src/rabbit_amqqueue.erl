@@ -626,21 +626,20 @@ lookup_in_mnesia(Table, Name) ->
     rabbit_misc:dirty_read({Table, Name}).
 
 lookup_in_khepri(Table, [Name]) ->
-    rabbit_khepri:transaction(
-      fun() ->
-              lookup_as_list_in_khepri(Table, Name)
-      end, ro);
+    as_list(lookup_in_khepri(Table, Name));
 lookup_in_khepri(Table, Names) when is_list(Names) ->
-    rabbit_khepri:transaction(
-      fun() ->
-              lists:append([lookup_as_list_in_khepri(Table, Name) || Name <- Names])
-      end, ro);
+    lists:append([as_list(lookup_in_khepri(Table, Name)) || Name <- Names]);
 lookup_in_khepri(Table, Name) ->
     Path = mnesia_table_to_khepri_path(Table, Name),
-    case rabbit_khepri:get(Path) of
-        {ok, #{data := Q}} -> {ok, Q};
+    case rabbit_khepri:get_data(Path) of
+        {ok, Q} -> {ok, Q};
         _  -> {error, not_found}
     end.
+
+as_list({ok, Q}) ->
+    [Q];
+as_list(_) ->
+    [].
 
 lookup_as_list_in_khepri(Table, Name) ->
     Path = mnesia_table_to_khepri_path(Table, Name),
@@ -683,7 +682,14 @@ not_found_or_absent_in_khepri(Name) ->
 not_found_or_absent_dirty(Name) ->
     rabbit_khepri:try_mnesia_or_khepri(
       fun() -> not_found_or_absent_dirty_in_mnesia(Name) end,
-      fun() -> rabbit_khepri:transaction(fun() -> not_found_or_absent_in_khepri(Name) end, ro) end).
+      fun() ->
+              %% This might hit khepri cache, vs a full transaction
+              Path = khepri_durable_queue_path(Name),
+              case rabbit_khepri:get_data(Path) of
+                  {ok, Q} -> {absent, Q, nodedown}; %% Q exists on stopped node
+                  _  -> not_found
+              end
+      end).
 
 not_found_or_absent_dirty_in_mnesia(Name) ->
     %% We should read from both tables inside a tx, to get a
