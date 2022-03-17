@@ -84,7 +84,7 @@
 
 %% For use by classic queue mirroring modules and rabbit_binding
 -export([lookup_as_list_in_khepri/2]).
--export([store_queue_in_khepri/1, store_queue_ram_in_khepri/1, store_queue_in_khepri/2]).
+-export([store_queue_in_khepri/1, store_queue_in_khepri/2, optimised_store_queue_in_khepri/1]).
 
 -include_lib("khepri/include/khepri.hrl").
 -include_lib("rabbit_common/include/rabbit.hrl").
@@ -198,12 +198,13 @@ do_mark_local_durable_queues_stopped_in_mnesia(VHost) ->
         end).
 
 do_mark_local_durable_queues_stopped_in_khepri(VHost) ->
-    Qs = find_local_durable_queues_in_khepri(VHost),
+    Qs0 = find_local_durable_queues_in_khepri(VHost),
+    Qs = [{khepri_durable_queue_path(amqqueue:get_name(Q)), amqqueue:set_state(Q, stopped)}
+          || Q <- Qs0, amqqueue:get_type(Q) =:= rabbit_classic_queue,
+             amqqueue:get_state(Q) =/= stopped ],
     rabbit_khepri:transaction(
         fun() ->
-            [ store_queue_in_khepri(amqqueue:set_state(Q, stopped))
-              || Q <- Qs, amqqueue:get_type(Q) =:= rabbit_classic_queue,
-                 amqqueue:get_state(Q) =/= stopped ]
+            [store_queue_as_is_in_khepri(Path, Q) || {Path, Q} <- Qs]
         end).
 
 find_local_durable_queues(VHost) ->
@@ -362,35 +363,42 @@ store_queue_in_mnesia(Q) ->
 
 store_queue_in_khepri_tx(Q) ->
     Decorators = rabbit_queue_decorator:active(Q),
-    Q1 = amqqueue:set_decorators(Q, Decorators),
+    Queue = amqqueue:set_decorators(Q, Decorators),
+    optimised_store_queue_in_khepri(Queue).
+
+optimised_store_queue_in_khepri(Queue) ->
+    QName = amqqueue:get_name(Queue),
+    Path = khepri_queue_path(QName),
+    DurablePath = khepri_durable_queue_path(QName),
+    DurableQueue = amqqueue:reset_mirroring_and_decorators(Queue),
     rabbit_khepri:transaction(
       fun() ->
-              store_queue_in_khepri(Q),
-              store_queue_ram_in_khepri(Q1)
+              store_queue_as_is_in_khepri(DurablePath, DurableQueue),
+              store_queue_as_is_in_khepri(Path, DurableQueue)
       end).
 
-store_queue_in_khepri(Q) when ?amqqueue_is_durable(Q) ->
-    Q1 = amqqueue:reset_mirroring_and_decorators(Q),
-    Path = khepri_durable_queue_path(amqqueue:get_name(Q1)),
-    case khepri_tx:put(Path, Q1) of
-        {ok, _} -> ok;
-        Error   -> khepri_tx:abort(Error)
-    end;
-store_queue_in_khepri(Q) when not ?amqqueue_is_durable(Q) ->
-    ok.
-
-store_queue_ram_in_khepri(Q) ->
-    Path = khepri_queue_path(amqqueue:get_name(Q)),
-    case khepri_tx:put(Path, Q) of
+store_queue_as_is_in_khepri(Path, Queue) ->
+    case khepri_tx:put(Path, Queue) of
         {ok, _} -> ok;
         Error   -> khepri_tx:abort(Error)
     end.
 
+store_queue_in_khepri(Q) when ?amqqueue_is_durable(Q) ->
+    Q1 = amqqueue:reset_mirroring_and_decorators(Q),
+    QName = amqqueue:get_name(Q1),
+    DurablePath = khepri_durable_queue_path(QName),
+    Path = khepri_queue_path(QName),
+    store_queue_as_is_in_khepri(DurablePath, Q1),
+    store_queue_as_is_in_khepri(Path, Q);
+store_queue_in_khepri(Q) when not ?amqqueue_is_durable(Q) ->
+    Path = khepri_queue_path(amqqueue:get_name(Q)),
+    store_queue_as_is_in_khepri(Path, Q).
+
 store_queue_in_khepri(Q, TableName) ->
     Path = mnesia_table_to_khepri_path(TableName, amqqueue:get_name(Q)),
-    case khepri_tx:put(Path, Q) of
+    case rabbit_khepri:put(Path, Q) of
         {ok, _} -> ok;
-        Error   -> khepri_tx:abort(Error)
+        Error   -> Error
     end.
 
 store_queue_without_recover_in_mnesia(Q) ->
@@ -414,10 +422,11 @@ store_queue_without_recover_in_mnesia(Q) ->
 store_queue_without_recover_in_khepri(Q) ->
     QueueName = amqqueue:get_name(Q),
     Path = khepri_queue_path(QueueName),
-    Q1 = rabbit_policy:set(Q),
-    Q2 = amqqueue:set_state(Q1, live),
+    DurablePath = khepri_durable_queue_path(QueueName),
+    Q1 = amqqueue:set_state(rabbit_policy:set(Q), live),
     Decorators = rabbit_queue_decorator:active(Q1),
-    Q3 = amqqueue:set_decorators(Q2, Decorators),
+    DurableQueue = amqqueue:reset_mirroring_and_decorators(Q1),
+    NonDurableQueue = amqqueue:set_decorators(Q1, Decorators),
     rabbit_khepri:transaction(
       fun() ->
               case khepri_tx:get(Path) of
@@ -426,9 +435,14 @@ store_queue_without_recover_in_khepri(Q) ->
                   _ ->
                       case not_found_or_absent_in_khepri(QueueName) of
                           not_found ->
-                              store_queue_in_khepri(Q2),
-                              store_queue_ram_in_khepri(Q3),
-                              {created, Q2};
+                              case ?amqqueue_is_durable(DurableQueue) of
+                                  true ->
+                                      store_queue_as_is_in_khepri(DurablePath, DurableQueue);
+                                  false ->
+                                      ok
+                              end,
+                              store_queue_as_is_in_khepri(Path, NonDurableQueue),
+                              {created, DurableQueue};
                           {absent, _, _} = R ->
                               khepri_tx:abort(R)
                       end
@@ -570,7 +584,7 @@ update_decorators_in_khepri(Name) ->
                   {ok, #{Path := #{data := Q0}}} ->
                       Q1 = amqqueue:reset_mirroring_and_decorators(Q0),
                       Q2 = amqqueue:set_decorators(Q1, Decorators),
-                      store_queue_ram_in_khepri(Q2),
+                      store_queue_as_is_in_khepri(Path, Q2),
                       ok;
                   _  ->
                       ok
@@ -2238,6 +2252,8 @@ internal_delete_in_khepri(QueueName, ActingUser, Reason) ->
 
 -spec forget_all_durable(node()) -> 'ok'.
 
+%% TODO this is used by `rabbit_mnesia:remove_node_if_mnesia_running`
+%% Does it make any sense once mnesia is not used/removed?
 forget_all_durable(Node) ->
     %% Note rabbit is not running so we avoid e.g. the worker pool. Also why
     %% we don't invoke the return from rabbit_binding:process_deletions/1.
@@ -2370,7 +2386,8 @@ has_synchronised_mirrors_online(Q) ->
     MirrorPids =/= [] andalso lists:any(fun rabbit_misc:is_process_alive/1, MirrorPids).
 
 -spec on_node_up(node()) -> 'ok'.
-
+%% TODO review this one with khepri clustering. It might not be needed anymore?
+%% Also when HA queues are deleted
 on_node_up(Node) ->
     ok = rabbit_misc:execute_mnesia_transaction(
            fun () ->

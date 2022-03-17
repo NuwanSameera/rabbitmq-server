@@ -22,8 +22,7 @@
 -export([maybe_auto_delete_in_mnesia/2, maybe_auto_delete_in_khepri/2]).
 -export([peek_serial_in_mnesia/1, peek_serial_in_khepri/1]).
 -export([mnesia_write_exchange_to_khepri/1, mnesia_write_durable_exchange_to_khepri/1,
-         mnesia_write_exchange_serial_to_khepri/1, mnesia_delete_exchange_to_khepri/1,
-         mnesia_delete_durable_exchange_to_khepri/1, mnesia_delete_exchange_serial_to_khepri/1,
+         mnesia_write_exchange_serial_to_khepri/1,
          clear_exchange_data_in_khepri/0, clear_durable_exchange_data_in_khepri/0,
          clear_exchange_serial_data_in_khepri/0]).
 -export([list_in_mnesia/2, list_in_khepri_tx/1, update_in_mnesia/2, update_in_khepri/2]).
@@ -530,15 +529,21 @@ update_decorators_in_mnesia(Name) ->
               end
       end).
 
-update_decorators_in_khepri(Name) ->
-    rabbit_khepri:transaction(
-      fun() ->
-              case lookup_as_list_in_khepri(Name) of
-                  [X] -> store_ram_in_khepri(X),
-                         ok;
-                  []  -> ok
-              end
-      end).
+update_decorators_in_khepri(#resource{virtual_host = VHost, name = Name} = XName) ->
+    Path = khepri_exchange_path(XName),
+    rabbit_kepri_misc:retry(
+      fun () -> update_decorators_in_khepri(Path, VHost, Name) end).
+
+update_decorators_in_khepri(Path, VHost, Name) ->
+    case rabbit_khepri:get(Path) of
+        {ok, #{Path := #{data := X, payload_version := Vsn}}} ->
+            X1 = rabbit_exchange_decorators:set(X),
+            Conditions = #if_all{conditions = [Name, #if_payload_version{version = Vsn}]},
+            UpdatePath = khepri_exchanges_path() ++ [VHost, Conditions],
+            rabbit_khepri:put(UpdatePath, X1);
+        _ ->
+            ok
+    end.
 
 -spec update
         (name(),
@@ -846,12 +851,15 @@ next_serial_in_mnesia(XName) ->
     Serial.
 
 next_serial_in_khepri(XName) ->
+    Path = khepri_exchange_serial_path(XName),
     rabbit_khepri:transaction(
       fun() ->
-              Serial = peek_serial_in_khepri(XName, write),
-              Path = khepri_exchange_serial_path(XName),
+              Serial = case khepri_tx:get(Path) of
+                           {ok, #{Path := #{data := #exchange_serial{next = Serial0}}}} -> Serial0;
+                           _ -> 1
+                       end,
               {ok, _} = khepri_tx:put(Path,
-                                      #exchange_serial{name = XName, next = Serial + 1}, write),
+                                      #exchange_serial{name = XName, next = Serial + 1}),
               Serial
       end).
 
@@ -943,27 +951,6 @@ mnesia_write_exchange_serial_to_khepri(
   #exchange{name = Resource} = Exchange) ->
     Path = khepri_exchange_serial_path(Resource),
     case rabbit_khepri:insert(Path, Exchange) of
-        ok    -> ok;
-        Error -> throw(Error)
-    end.
-
-mnesia_delete_exchange_to_khepri(#exchange{name = Resource}) ->
-    Path = khepri_exchange_path(Resource),
-    case rabbit_khepri:delete(Path) of
-        ok    -> ok;
-        Error -> throw(Error)
-    end.
-
-mnesia_delete_durable_exchange_to_khepri(#exchange{name = Resource}) ->
-    Path = khepri_durable_exchange_path(Resource),
-    case rabbit_khepri:delete(Path) of
-        ok    -> ok;
-        Error -> throw(Error)
-    end.
-
-mnesia_delete_exchange_serial_to_khepri(#exchange{name = Resource}) ->
-    Path = khepri_exchange_serial_path(Resource),
-    case rabbit_khepri:delete(Path) of
         ok    -> ok;
         Error -> throw(Error)
     end.
