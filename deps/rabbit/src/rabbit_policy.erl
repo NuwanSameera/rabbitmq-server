@@ -290,7 +290,7 @@ recover0() ->
               rabbit_khepri:transaction(
                 fun() ->
                         [rabbit_exchange:store_in_khepri(X, rabbit_durable_exchange) || X <- Xs]
-                end)
+                end, rw)
       end),
     [begin
          QName = amqqueue:get_name(Q0),
@@ -584,7 +584,7 @@ update_matched_objects_in_khepri(VHost) ->
               fun() ->
                       {[update_exchange(Map) || Map <- Exchanges, is_map(Map)],
                        [update_queue(Map) || Map <- Queues, is_map(Map)]}
-              end)
+              end, rw)
     end.
 
 update_exchange(#{exchange := X = #exchange{name = XName},

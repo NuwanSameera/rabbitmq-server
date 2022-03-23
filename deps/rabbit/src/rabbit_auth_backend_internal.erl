@@ -756,7 +756,7 @@ set_permissions_in_khepri(Username, VirtualHost, UserPermission) ->
                     {ok, _} -> ok;
                     Error   -> khepri_tx:abort(Error)
                 end
-        end)).
+        end), rw).
 
 -spec clear_permissions
         (rabbit_types:username(), rabbit_types:vhost(), rabbit_types:username()) -> 'ok'.
@@ -836,7 +836,7 @@ clear_permissions_in_khepri(Username, VirtualHost) ->
                     {ok, _} -> ok;
                     Error   -> khepri_tx:abort(Error)
                 end
-        end)).
+        end), rw).
 
 update_user(Username, Fun) ->
     rabbit_khepri:try_mnesia_or_khepri(
@@ -863,7 +863,7 @@ update_user_in_khepri(Username, Fun) ->
                     {ok, #{Path := #{data := User}}} -> ok;
                     Error                            -> khepri_tx:abort(Error)
                 end
-        end)).
+        end), rw).
 
 set_topic_permissions(Username, VirtualHost, Exchange, WritePerm, ReadPerm, ActingUser) ->
     rabbit_log:debug("Asked to set topic permissions on exchange '~s' for "
@@ -963,7 +963,7 @@ set_topic_permissions_in_khepri(
                     {ok, _} -> ok;
                     Error   -> khepri_tx:abort(Error)
                 end
-        end)).
+        end), rw).
 
 clear_topic_permissions(Username, VirtualHost, ActingUser) ->
     rabbit_log:debug("Asked to clear topic permissions for '~s' in virtual host '~s'",
