@@ -30,10 +30,13 @@
 -export([implicit_for_destination/1, reverse_binding/1]).
 -export([new/4]).
 
+-export([mnesia_write_route_to_khepri/1, mnesia_write_durable_route_to_khepri/1,
+         mnesia_write_semi_durable_route_to_khepri/1, mnesia_write_reverse_route_to_khepri/1,
+         clear_route_in_khepri/0]).
+
 -define(DEFAULT_EXCHANGE(VHostPath), #resource{virtual_host = VHostPath,
                                               kind = exchange,
                                               name = <<>>}).
--compile(export_all).
 %%----------------------------------------------------------------------------
 
 -export_type([key/0, deletions/0]).
@@ -50,10 +53,6 @@
                             rabbit_types:error(
                               {'binding_invalid', string(), [any()]}).
 -type bind_res() :: bind_ok_or_error() | rabbit_misc:thunk(bind_ok_or_error()).
--type inner_fun() ::
-        fun((rabbit_types:exchange(),
-             rabbit_types:exchange() | amqqueue:amqqueue()) ->
-                   rabbit_types:ok_or_error(rabbit_types:amqp_error())).
 -type bindings() :: [rabbit_types:binding()].
 
 %% TODO this should really be opaque but that seems to confuse 17.1's
@@ -243,7 +242,7 @@ add(Binding, ActingUser) ->
       fun() -> add_in_mnesia(Binding, fun(_, _) -> ok end, ActingUser) end,
       fun() -> add_in_khepri(Binding, undefined, ActingUser) end).
 
--spec add(rabbit_types:binding(), inner_fun(), rabbit_types:username()) -> bind_res().
+-spec add(rabbit_types:binding(), pid(), rabbit_types:username()) -> bind_res().
 
 add(Binding, ConnPid, ActingUser) ->
     InnerFun = fun (_X, Q) when ?is_amqqueue(Q) ->
@@ -346,11 +345,18 @@ remove(Binding) -> remove(Binding, fun (_Src, _Dst) -> ok end, ?INTERNAL_USER).
 remove(Binding, ActingUser) -> remove(Binding, fun (_Src, _Dst) -> ok end, ActingUser).
 
 
--spec remove(rabbit_types:binding(), inner_fun(), rabbit_types:username()) -> bind_res().
-remove(Binding, InnerFun, ActingUser) ->
+-spec remove(rabbit_types:binding(), pid(), rabbit_types:username()) -> bind_res().
+remove(Binding, ConnPid, ActingUser) ->
+    InnerFun = fun (_X, Q) when ?is_amqqueue(Q) ->
+                       try rabbit_amqqueue:check_exclusive_access(Q, ConnPid)
+                       catch exit:Reason -> {error, Reason}
+                       end;
+                   (_X, #exchange{}) ->
+                       ok
+               end,
     rabbit_khepri:try_mnesia_or_khepri(
       fun() -> remove_in_mnesia(Binding, InnerFun, ActingUser) end,
-      fun() -> remove_in_khepri(Binding, InnerFun, ActingUser) end).
+      fun() -> remove_in_khepri(Binding, ConnPid, ActingUser) end).
 
 remove_in_mnesia(Binding, InnerFun, ActingUser) ->
     binding_action_in_mnesia(
@@ -437,16 +443,27 @@ remove_default_exchange_binding_rows_of(Dst = #resource{}) ->
 -spec list_explicit() -> bindings().
 
 list_explicit() ->
-    mnesia:async_dirty(
-        fun () ->
-            AllRoutes = mnesia:dirty_match_object(rabbit_route, #route{_ = '_'}),
-            %% if there are any default exchange bindings left after an upgrade
-            %% of a pre-3.8 database, filter them out
-            AllBindings = [B || #route{binding = B} <- AllRoutes],
-            lists:filter(fun(#binding{source = S}) ->
-                            not (S#resource.kind =:= exchange andalso S#resource.name =:= <<>>)
-                         end, AllBindings)
-            end).
+    rabbit_khepri:try_mnesia_or_khepri(
+      fun() ->
+              mnesia:async_dirty(
+                fun () ->
+                        AllRoutes = mnesia:dirty_match_object(rabbit_route, #route{_ = '_'}),
+                        %% if there are any default exchange bindings left after an upgrade
+                        %% of a pre-3.8 database, filter them out
+                        AllBindings = [B || #route{binding = B} <- AllRoutes],
+                        lists:filter(fun(#binding{source = S}) ->
+                                             not (S#resource.kind =:= exchange andalso S#resource.name =:= <<>>)
+                                     end, AllBindings)
+                end)
+      end,
+      fun() ->
+              Condition = #if_not{condition = #if_name_matches{regex = "^$"}},
+              Path = khepri_routes_path() ++ [?STAR, Condition, ?STAR_STAR],
+              {ok, Data} = rabbit_khepri:match_and_get_data(Path),
+              lists:foldl(fun(#{bindings := SetOfBindings}, Acc) ->
+                                  sets:to_list(SetOfBindings) ++ Acc
+                          end, [], maps:values(Data))
+      end).
 
 -spec list(rabbit_types:vhost()) -> bindings().
 
@@ -571,13 +588,22 @@ list_for_source_and_destination(?DEFAULT_EXCHANGE(VHostPath),
               key = QName,
               args = []}];
 list_for_source_and_destination(SrcName, DstName) ->
-    mnesia:async_dirty(
+    rabbit_khepri:try_mnesia_or_khepri(
       fun() ->
-              Route = #route{binding = #binding{source      = SrcName,
-                                                destination = DstName,
-                                                _           = '_'}},
-              [B || #route{binding = B} <- mnesia:match_object(rabbit_route,
-                                                               Route, read)]
+              mnesia:async_dirty(
+                fun() ->
+                        Route = #route{binding = #binding{source      = SrcName,
+                                                          destination = DstName,
+                                                          _           = '_'}},
+                        [B || #route{binding = B} <- mnesia:match_object(rabbit_route,
+                                                                         Route, read)]
+                end)
+      end,
+      fun() ->
+              Data = match_source_and_destination_in_khepri(SrcName, DstName),
+              lists:foldl(fun(#{bindings := SetOfBindings}, Acc) ->
+                                  sets:to_list(SetOfBindings) ++ Acc
+                          end, [], maps:values(Data))
       end).
 
 -spec info_keys() -> rabbit_types:info_keys().
@@ -653,7 +679,7 @@ remove_for_source_in_mnesia(SrcName) ->
 remove_for_source_in_khepri(SrcName) ->
     Bindings = match_source_in_khepri(SrcName),
     remove_in_khepri(Bindings),
-    maps:fold(fun(_, Set, Acc) ->
+    maps:fold(fun(_, #{bindings := Set}, Acc) ->
                       sets:to_list(Set) ++ Acc
               end, [], Bindings).
 
@@ -727,20 +753,20 @@ sync_transient_route(Route, Fun) ->
     ok = Fun(rabbit_route, Route, write),
     ok = Fun(rabbit_reverse_route, reverse_route(Route), write).
 
-binding_set(Path) ->
+bindings_data(Path, BindingType) ->
     case khepri_tx:get(Path) of
-        {ok, #{Path := #{data := #{bindings := Set}}}} ->
-            Set;
+        {ok, #{Path := #{data := Data}}} ->
+            Data;
         _ ->
-            sets:new()
+            #{bindings => sets:new(), type => BindingType}
     end.
 
 add_binding(Binding, BindingType) ->
     Path = khepri_route_path(Binding),
     rabbit_khepri:transaction(
       fun() ->
-              Set = binding_set(Path),
-              Data = #{bindings => sets:add_element(Binding, Set), type => BindingType},
+              Data0 = #{bindings := Set} = bindings_data(Path, BindingType),
+              Data = Data0#{bindings => sets:add_element(Binding, Set)},
               {ok, _} = khepri_tx:put(Path, #kpayload_data{data = Data}),
               add_routing(Binding),
               ok
@@ -1116,6 +1142,9 @@ khepri_routes_path() ->
 %% It only needs to store a list of destinations to be used by rabbit_router.
 %% Unless there is a high queue churn, this should barely change. Thus, the small
 %% penalty for updates should be worth it.
+khepri_routing_path() ->
+    [?MODULE, routing].
+
 khepri_routing_path(#binding{source = Src, key = RoutingKey}) ->
     khepri_routing_path(Src, RoutingKey).
 
@@ -1158,3 +1187,33 @@ match_destination_in_khepri(#resource{virtual_host = VHost, kind = Kind, name = 
         ++ [#if_all{conditions = [?STAR_STAR, #if_data_matches{pattern = #{type => Type}}]}],
     {ok, Map} = rabbit_khepri:tx_match_and_get_data(Path),
     Map.
+
+match_source_and_destination_in_khepri(#resource{virtual_host = VHost, name = Name},
+                                       #resource{kind = Kind, name = DstName}) ->
+    Path = khepri_routes_path() ++ [VHost, Name, Kind, DstName, ?STAR_STAR],
+    {ok, Map} = rabbit_khepri:match_and_get_data(Path),
+    Map.
+
+clear_route_in_khepri() ->
+    Path = khepri_routes_path(),
+    RoutingPath = khepri_routing_path(),
+    case rabbit_khepri:delete(Path) of
+        ok ->
+            case rabbit_khepri:delete(RoutingPath) of
+                ok -> ok;
+                Error -> throw(Error)
+            end;
+        Error -> throw(Error)
+    end.
+
+mnesia_write_route_to_khepri(#route{binding = Binding})->
+    add_binding(Binding, transient).
+
+mnesia_write_durable_route_to_khepri(#route{binding = Binding})->
+    add_binding(Binding, durable).
+
+mnesia_write_semi_durable_route_to_khepri(#route{binding = Binding})->
+    add_binding(Binding, semi_durable).
+
+mnesia_write_reverse_route_to_khepri(_)->
+    ok.
