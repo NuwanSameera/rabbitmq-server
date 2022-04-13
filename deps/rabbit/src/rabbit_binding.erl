@@ -26,6 +26,7 @@
          remove_transient_for_destination_in_mnesia/1, remove_transient_for_destination_in_khepri/1,
          has_for_source_in_khepri/1, process_deletions_in_khepri/2]).
 -export([match_source_in_khepri/1, match_source_and_key_in_khepri/2]).
+-export([match_source_and_destination_in_khepri/2]).
 
 -export([implicit_for_destination/1, reverse_binding/1,
          index_route_table_definition/0, populate_index_route_table/0]).
