@@ -938,7 +938,7 @@ mnesia_write_exchange_to_khepri(
   #exchange{name = Resource} = Exchange) ->
     Path = khepri_exchange_path(Resource),
     case rabbit_khepri:create(Path, Exchange) of
-        ok    -> ok;
+        {ok, _} -> ok;
         {error, {mismatching_node, _}} -> ok;
         Error -> throw(Error)
     end.
@@ -948,7 +948,7 @@ mnesia_write_durable_exchange_to_khepri(
     Path = khepri_exchange_path(Resource),
     Exchange = rabbit_exchange_decorator:set(Exchange0),
     case rabbit_khepri:create(Path, Exchange) of
-        ok    -> ok;
+        {ok, _} -> ok;
         {error, {mismatching_node, _}} -> ok;
         Error -> throw(Error)
     end.
@@ -959,7 +959,7 @@ mnesia_write_exchange_serial_to_khepri(
                                                [#if_node_exists{exists = false}]),
     Extra = #{keep_while => #{khepri_exchange_path(Resource) => #if_node_exists{exists = true}}},
     case rabbit_khepri:put(Path, Exchange, Extra) of
-        ok    -> ok;
+        {ok, _} -> ok;
         Error -> throw(Error)
     end.
 
@@ -970,13 +970,13 @@ clear_exchange_data_in_khepri() ->
 clear_durable_exchange_data_in_khepri() ->
     Path = khepri_exchanges_path(),
     case rabbit_khepri:delete(Path) of
-        ok    -> ok;
+        {ok, _} -> ok;
         Error -> throw(Error)
     end.
 
 clear_exchange_serial_data_in_khepri() ->
     Path = khepri_exchange_serials_path(),
     case rabbit_khepri:delete(Path) of
-        ok    -> ok;
+        {ok, _} -> ok;
         Error -> throw(Error)
     end.

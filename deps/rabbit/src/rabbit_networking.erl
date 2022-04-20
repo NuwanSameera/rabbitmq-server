@@ -792,6 +792,6 @@ mnesia_write_to_khepri(Listener) ->
 clear_data_in_khepri() ->
     Path = khepri_listeners_path(),
     case rabbit_khepri:delete(Path) of
-        ok    -> ok;
+        {ok, _} -> ok;
         Error -> throw(Error)
     end.

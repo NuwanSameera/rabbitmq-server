@@ -117,8 +117,9 @@
 %% (inserted by a version older than 3.6.0) and fall back to MD5, the
 %% now obsolete hashing function.
 hashing_module_for_user(User) ->
+    
     ModOrUndefined = internal_user:get_hashing_algorithm(User),
-    rabbit_password:hashing_mod(ModOrUndefined).
+        rabbit_password:hashing_mod(ModOrUndefined).
 
 -define(BLANK_PASSWORD_REJECTION_MESSAGE,
         "user '~s' attempted to log in with a blank password, which is prohibited by the internal authN backend. "
@@ -126,17 +127,22 @@ hashing_module_for_user(User) ->
         "Alternatively change the password for the user to be non-blank.").
 
 with_user(Username, Thunk) ->
+    
     fun() ->
+            
             rabbit_khepri:try_mnesia_or_khepri(
               with_user_in_mnesia(Username, Thunk),
               with_user_in_khepri(Username, Thunk))
     end.
 
 with_user_in_mnesia(Username, Thunk) ->
+    
     fun () ->
+            
             case mnesia:read({rabbit_user, Username}) of
-                [_U] -> Thunk();
-                []   -> mnesia:abort({no_such_user, Username})
+                [_U] ->
+                    Thunk();
+                                []   -> mnesia:abort({no_such_user, Username})
             end
     end.
 
@@ -756,7 +762,7 @@ set_permissions_in_khepri(Username, VirtualHost, UserPermission) ->
                     {ok, _} -> ok;
                     Error   -> khepri_tx:abort(Error)
                 end
-        end), rw).
+        end)).
 
 -spec clear_permissions
         (rabbit_types:username(), rabbit_types:vhost(), rabbit_types:username()) -> 'ok'.
@@ -836,7 +842,7 @@ clear_permissions_in_khepri(Username, VirtualHost) ->
                     {ok, _} -> ok;
                     Error   -> khepri_tx:abort(Error)
                 end
-        end), rw).
+        end)).
 
 update_user(Username, Fun) ->
     rabbit_khepri:try_mnesia_or_khepri(
@@ -863,7 +869,7 @@ update_user_in_khepri(Username, Fun) ->
                     {ok, #{Path := #{data := User}}} -> ok;
                     Error                            -> khepri_tx:abort(Error)
                 end
-        end), rw).
+        end)).
 
 set_topic_permissions(Username, VirtualHost, Exchange, WritePerm, ReadPerm, ActingUser) ->
     rabbit_log:debug("Asked to set topic permissions on exchange '~s' for "
@@ -963,7 +969,7 @@ set_topic_permissions_in_khepri(
                     {ok, _} -> ok;
                     Error   -> khepri_tx:abort(Error)
                 end
-        end), rw).
+        end)).
 
 clear_topic_permissions(Username, VirtualHost, ActingUser) ->
     rabbit_log:debug("Asked to clear topic permissions for '~s' in virtual host '~s'",

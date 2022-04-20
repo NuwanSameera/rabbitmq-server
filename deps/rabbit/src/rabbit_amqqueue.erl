@@ -2637,56 +2637,56 @@ mnesia_table_to_khepri_path(rabbit_queue, QName) ->
 
 mnesia_write_queue_to_khepri(Q) ->
     Path = khepri_queue_path(amqqueue:get_name(Q)),
-    case rabbit_khepri:insert(Path, Q) of
-        ok    -> ok;
+    case rabbit_khepri:put(Path, Q) of
+        {ok, _} -> ok;
         Error -> throw(Error)
     end.
 
 mnesia_write_durable_queue_to_khepri(Q) ->
     Path = khepri_durable_queue_path(amqqueue:get_name(Q)),
-    case rabbit_khepri:insert(Path, Q) of
-        ok    -> ok;
+    case rabbit_khepri:put(Path, Q) of
+        {ok, _} -> ok;
         Error -> throw(Error)
     end.
 
 mnesia_delete_queue_to_khepri(Q) ->
     Path = khepri_queue_path(amqqueue:get_name(Q)),
     case rabbit_khepri:delete(Path) of
-        ok    -> ok;
+        {ok, _} -> ok;
         Error -> throw(Error)
     end.
 
 mnesia_delete_durable_queue_to_khepri(Q) ->
     Path = khepri_queue_path(amqqueue:get_name(Q)),
     case rabbit_khepri:delete(Path) of
-        ok    -> ok;
+        {ok, _} -> ok;
         Error -> throw(Error)
     end.
 
 clear_queue_data_in_khepri() ->
     Path = khepri_queues_path(),
     case rabbit_khepri:delete(Path) of
-        ok    -> ok;
+        {ok, _} -> ok;
         Error -> throw(Error)
     end.
 
 clear_durable_queue_data_in_khepri() ->
     Path = khepri_durable_queues_path(),
     case rabbit_khepri:delete(Path) of
-        ok    -> ok;
+        {ok, _} -> ok;
         Error -> throw(Error)
     end.
 
 mnesia_delete_to_khepri(#resource{} = Name) ->
     Path = khepri_queue_path(Name),
     case rabbit_khepri:delete(Path) of
-        ok    -> ok;
+        {ok, _} -> ok;
         Error -> throw(Error)
     end.
 
 mnesia_delete_durable_to_khepri(#resource{} = Name) ->
     Path = khepri_durable_queue_path(Name),
     case rabbit_khepri:delete(Path) of
-        ok    -> ok;
+        {ok, _} -> ok;
         Error -> throw(Error)
     end.

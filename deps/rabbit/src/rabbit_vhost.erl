@@ -351,7 +351,10 @@ delete(VHost, ActingUser) ->
              fun() -> internal_delete(VHost, ActingUser) end),
     ok = rabbit_event:notify(vhost_deleted, [{name, VHost},
                                              {user_who_performed_action, ActingUser}]),
-    [Fun() || Fun <- Funs, is_function(Fun)],
+    [case Fun() of
+         ok                                  -> ok;
+         {error, {no_such_vhost, VHost}} -> ok
+     end || Fun <- Funs],
     %% After vhost was deleted from mnesia DB, we try to stop vhost supervisors
     %% on all the nodes.
     rabbit_vhost_sup_sup:delete_on_all_nodes(VHost),

@@ -154,7 +154,8 @@ delete_in_mnesia(X) ->
     ok.
 
 delete_in_khepri(X) ->
-    rabbit_khepri:delete(khepri_exchange_type_topic_path(X)).
+    {ok, _} = rabbit_khepri:delete(khepri_exchange_type_topic_path(X)),
+    ok.
 
 internal_add_binding(#binding{source = X, key = K, destination = D, args = Args}) ->
     rabbit_khepri:try_mnesia_or_khepri(
@@ -396,7 +397,7 @@ split_topic_key(<<C:8, Rest/binary>>, RevWordAcc, RevResAcc) ->
 clear_data_in_khepri() ->
     Path = [?MODULE, topic_trie_binding],
     case rabbit_khepri:delete(Path) of
-        ok    -> ok;
+        {ok, _} -> ok;
         Error -> throw(Error)
     end.
 

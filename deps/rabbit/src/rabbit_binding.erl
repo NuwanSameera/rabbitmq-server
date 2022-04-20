@@ -1317,9 +1317,9 @@ clear_route_in_khepri() ->
     Path = khepri_routes_path(),
     RoutingPath = khepri_routing_path(),
     case rabbit_khepri:delete(Path) of
-        ok ->
+        {ok, _} ->
             case rabbit_khepri:delete(RoutingPath) of
-                ok -> ok;
+                {ok, _} -> ok;
                 Error -> throw(Error)
             end;
         Error -> throw(Error)
