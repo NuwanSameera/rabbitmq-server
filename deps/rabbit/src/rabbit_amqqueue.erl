@@ -7,27 +7,24 @@
 
 -module(rabbit_amqqueue).
 
--export([store_queue_ram_dirty/1]).
 -export([warn_file_limit/0]).
 -export([recover/1, stop/1, start/1, declare/6, declare/7,
          delete_immediately/1, delete_exclusive/2, delete/4, purge/1,
          forget_all_durable/1]).
 -export([pseudo_queue/2, pseudo_queue/3, immutable/1]).
--export([lookup/1, lookup_many/1, not_found_or_absent_dirty/1,
+-export([lookup/1,
          with/2, with/3, with_or_die/2,
          assert_equivalence/5,
          check_exclusive_access/2, with_exclusive_access_or_die/3,
          stat/1, deliver/2,
          requeue/3, ack/3, reject/4]).
--export([not_found_or_absent_in_mnesia/1, not_found_or_absent_in_khepri/1]).
 -export([not_found/1, absent/2]).
--export([list/0, list/1, info_keys/0, info/1, info/2, info_all/1, info_all/2,
+-export([list/0, list_durable/0, list/1, info_keys/0, info/1, info/2, info_all/1, info_all/2,
          emit_info_all/5, list_local/1, info_local/1,
          emit_info_local/4, emit_info_down/4]).
 -export([count/0]).
 -export([list_down/1, count/1, list_names/0, list_names/1, list_local_names/0,
-         list_local_names_down/0, list_with_possible_retry/1]).
--export([list_with_possible_retry_in_mnesia/1, list_with_possible_retry_in_khepri/1]).
+         list_local_names_down/0]).
 -export([list_by_type/1, sample_local_queues/0, sample_n_by_name/2, sample_n/2]).
 -export([force_event_refresh/1, notify_policy_changed/1]).
 -export([consumers/1, consumers_all/1,  emit_consumers_all/4, consumer_info_keys/0]).
@@ -35,7 +32,7 @@
 -export([notify_sent/2, notify_sent_queue_down/1, resume/2]).
 -export([notify_down_all/2, notify_down_all/3, activate_limit_all/2, credit/5]).
 -export([on_node_up/1, on_node_down/1]).
--export([update/2, update/3, store_queue/1, update_decorators/1, policy_changed/2]).
+-export([update/2, store_queue/1, update_decorators/1, policy_changed/2]).
 -export([update_mirroring/1, sync_mirrors/1, cancel_sync_mirrors/1]).
 -export([emit_unresponsive/6, emit_unresponsive_local/5, is_unresponsive/2]).
 -export([has_synchronised_mirrors_online/1, is_match/2, is_in_virtual_host/2]).
@@ -53,9 +50,7 @@
 -export([delete_crashed/1,
          delete_crashed/2,
          delete_crashed_internal/2]).
--export([update_in_tx/2, lookup_durable_queue/1, list_in_khepri_tx/1]).
--export([list_in_mnesia/1, list_in_mnesia/2, list_in_khepri/1, list_table/1,
-         update_in_mnesia/2, update_in_khepri/2]).
+-export([lookup_durable_queue/1]).
 
 -export([pid_of/1, pid_of/2]).
 -export([mark_local_durable_queues_stopped/1]).
@@ -71,22 +66,11 @@
 
 -export([deactivate_limit_all/2]).
 
--export([mnesia_write_queue_to_khepri/1, mnesia_write_durable_queue_to_khepri/1,
-         mnesia_delete_queue_to_khepri/1, mnesia_delete_durable_queue_to_khepri/1,
-         clear_queue_data_in_khepri/0, clear_durable_queue_data_in_khepri/0,
-         lookup_in_khepri/2]).
--export([mnesia_delete_to_khepri/1, mnesia_delete_durable_to_khepri/1]).
-
 %% internal
 -export([internal_declare/2, internal_delete/2, run_backing_queue/3,
          set_ram_duration_target/2, set_maximum_since_use/2,
          emit_consumers_local/3, internal_delete/3]).
 
-%% For use by classic queue mirroring modules and rabbit_binding
--export([lookup_as_list_in_khepri/2]).
--export([store_queue_in_khepri/1, store_queue_in_khepri/2, optimised_store_queue_in_khepri/1]).
-
--include_lib("khepri/include/khepri.hrl").
 -include_lib("rabbit_common/include/rabbit.hrl").
 -include_lib("stdlib/include/qlc.hrl").
 -include("amqqueue.hrl").
@@ -176,92 +160,28 @@ start(Qs) ->
     ok.
 
 mark_local_durable_queues_stopped(VHost) ->
-    rabbit_khepri:try_mnesia_or_khepri(
-      fun() ->
-              ?try_mnesia_tx_or_upgrade_amqqueue_and_retry(
-                 do_mark_local_durable_queues_stopped_in_mnesia(VHost),
-                 do_mark_local_durable_queues_stopped_in_mnesia(VHost))
-      end,
-      fun() ->
-              ?try_mnesia_tx_or_upgrade_amqqueue_and_retry(
-                 do_mark_local_durable_queues_stopped_in_khepri(VHost),
-                 do_mark_local_durable_queues_stopped_in_khepri(VHost))
-      end).
+    ?try_tx_or_upgrade_amqqueue_and_retry(
+       do_mark_local_durable_queues_stopped(VHost),
+       do_mark_local_durable_queues_stopped(VHost)).
 
-do_mark_local_durable_queues_stopped_in_mnesia(VHost) ->
-    Qs = find_local_durable_queues_in_mnesia(VHost),
-    rabbit_misc:execute_mnesia_transaction(
-        fun() ->
-            [ store_queue(amqqueue:set_state(Q, stopped))
-              || Q <- Qs, amqqueue:get_type(Q) =:= rabbit_classic_queue,
-                 amqqueue:get_state(Q) =/= stopped ]
-        end).
-
-do_mark_local_durable_queues_stopped_in_khepri(VHost) ->
-    Qs0 = find_local_durable_queues_in_khepri(VHost),
-    Qs = [{khepri_durable_queue_path(amqqueue:get_name(Q)), amqqueue:set_state(Q, stopped)}
+do_mark_local_durable_queues_stopped(VHost) ->
+    Qs0 = find_local_durable_queues(VHost),
+    Qs = [amqqueue:set_state(Q, stopped)
           || Q <- Qs0, amqqueue:get_type(Q) =:= rabbit_classic_queue,
              amqqueue:get_state(Q) =/= stopped ],
-    rabbit_khepri:transaction(
-      fun() ->
-              [store_queue_as_is_in_khepri(Path, Q) || {Path, Q} <- Qs]
-      end, rw).
-
-find_local_durable_queues(VHost) ->
-    rabbit_khepri:try_mnesia_or_khepri(
-      fun() ->
-              find_local_durable_queues_in_mnesia(VHost)
-      end,
-      fun() ->
-              find_local_durable_queues_in_khepri(VHost)
-      end).
-
-find_local_durable_queues_in_mnesia(VHost) ->
-    mnesia:async_dirty(
-      fun () ->
-              qlc:e(
-                qlc:q(
-                  [Q || Q <- mnesia:table(rabbit_durable_queue),
-                        amqqueue:get_vhost(Q) =:= VHost andalso
-                        rabbit_queue_type:is_recoverable(Q)
-                  ]))
-      end).
-
-find_local_durable_queues_in_khepri(VHost) ->
-    Path = khepri_durable_queues_path(),
-    {ok, Map} = rabbit_khepri:match_and_get_data(Path ++ [VHost, ?STAR_STAR]),
-    maps:fold(fun(_, Q, Acc) ->
-                      case rabbit_queue_type:is_recoverable(Q) of
-                          true -> [Q | Acc];
-                          _ -> Acc
-                      end
-              end, [], Map).
+    rabbit_store:store_queues(Qs).
 
 find_recoverable_queues() ->
-    rabbit_khepri:try_mnesia_or_khepri(
-      fun() ->
-              find_recoverable_queues_in_mnesia()
-      end,
-      fun() ->
-              find_recoverable_queues_in_khepri()
-      end).
+    Qs = rabbit_store:list_durable_queues(),
+    lists:filter(fun(Q) ->
+                         rabbit_queue_type:is_recoverable(Q)
+                 end, Qs).
 
-find_recoverable_queues_in_mnesia() ->
-    mnesia:async_dirty(
-      fun () ->
-              qlc:e(qlc:q([Q || Q <- mnesia:table(rabbit_durable_queue),
-                                rabbit_queue_type:is_recoverable(Q)]))
-      end).
-
-find_recoverable_queues_in_khepri() ->
-    Path = khepri_durable_queues_path() ++ [?STAR],
-    {ok, Map} = rabbit_khepri:match_and_get_data(Path),
-    maps:fold(fun(_, Q, Acc) ->
-                      case rabbit_queue_type:is_recoverable(Q) of
-                          true -> [Q | Acc];
-                          _ -> Acc
-                      end
-              end, [], Map).
+find_local_durable_queues(VHost) ->
+    Qs = rabbit_store:list_durable_queues(VHost),
+    lists:filter(fun(Q) ->
+                         rabbit_queue_type:is_recoverable(Q)
+                 end, Qs).
 
 -spec declare(name(),
               boolean(),
@@ -326,270 +246,49 @@ get_queue_type(Args) ->
     {created | existing, amqqueue:amqqueue()} | queue_absent().
 
 internal_declare(Q, Recover) ->
-    rabbit_khepri:try_mnesia_or_khepri(
-      fun() ->
-         ?try_mnesia_tx_or_upgrade_amqqueue_and_retry(
-            do_internal_declare_in_mnesia(Q, Recover),
-            begin
-                Q1 = amqqueue:upgrade(Q),
-                do_internal_declare_in_mnesia(Q1, Recover)
-            end)
-      end,
-      fun() ->
-         ?try_mnesia_tx_or_upgrade_amqqueue_and_retry(
-            do_internal_declare_in_khepri(Q, Recover),
-            begin
-                Q1 = amqqueue:upgrade(Q),
-                do_internal_declare_in_khepri(Q1, Recover)
-            end)
-      end).
+    ?try_tx_or_upgrade_amqqueue_and_retry(
+       do_internal_declare(Q, Recover),
+       begin
+           Q1 = amqqueue:upgrade(Q),
+           do_internal_declare(Q1, Recover)
+       end).
 
-do_internal_declare_in_mnesia(Q, true) ->
-    store_queue_in_mnesia(Q);
-do_internal_declare_in_mnesia(Q, false) ->
-    store_queue_without_recover_in_mnesia(Q).
+do_internal_declare(Q0, true) ->
+    Q = amqqueue:set_state(Q0, live),
+    store_queue(Q),
+    {created, Q};
+do_internal_declare(Q0, false) ->
+    Q = rabbit_policy:set(amqqueue:set_state(Q0, live)),
+    Queue = rabbit_queue_decorator:set(Q),
+    DurableQueue = amqqueue:reset_mirroring_and_decorators(Q),
+    rabbit_store:store_queue_without_recover(DurableQueue, Queue).
 
-do_internal_declare_in_khepri(Q, true) ->
-    store_queue_in_khepri_tx(Q);
-do_internal_declare_in_khepri(Q, false) ->
-    store_queue_without_recover_in_khepri(Q).
-
-store_queue_in_mnesia(Q) ->
-    rabbit_misc:execute_mnesia_tx_with_tail(
-      fun () ->
-              ok = store_queue(amqqueue:set_state(Q, live)),
-              rabbit_misc:const({created, Q})
-      end).
-
-store_queue_in_khepri_tx(Q) ->
-    Decorators = rabbit_queue_decorator:active(Q),
-    Queue = amqqueue:set_decorators(Q, Decorators),
-    optimised_store_queue_in_khepri(Queue).
-
-optimised_store_queue_in_khepri(Queue) ->
-    QName = amqqueue:get_name(Queue),
-    Path = khepri_queue_path(QName),
-    DurablePath = khepri_durable_queue_path(QName),
-    DurableQueue = amqqueue:reset_mirroring_and_decorators(Queue),
-    rabbit_khepri:transaction(
-      fun() ->
-              store_queue_as_is_in_khepri(DurablePath, DurableQueue),
-              store_queue_as_is_in_khepri(Path, DurableQueue)
-      end).
-
-store_queue_as_is_in_khepri(Path, Queue) ->
-    case khepri_tx:put(Path, Queue) of
-        {ok, _} -> ok;
-        Error   -> khepri_tx:abort(Error)
-    end.
-
-store_queue_in_khepri(Q) when ?amqqueue_is_durable(Q) ->
-    Q1 = amqqueue:reset_mirroring_and_decorators(Q),
-    QName = amqqueue:get_name(Q1),
-    DurablePath = khepri_durable_queue_path(QName),
-    Path = khepri_queue_path(QName),
-    store_queue_as_is_in_khepri(DurablePath, Q1),
-    store_queue_as_is_in_khepri(Path, Q);
-store_queue_in_khepri(Q) when not ?amqqueue_is_durable(Q) ->
-    Path = khepri_queue_path(amqqueue:get_name(Q)),
-    store_queue_as_is_in_khepri(Path, Q).
-
-store_queue_in_khepri(Q, TableName) ->
-    Path = mnesia_table_to_khepri_path(TableName, amqqueue:get_name(Q)),
-    case rabbit_khepri:put(Path, Q) of
-        {ok, _} -> ok;
-        Error   -> Error
-    end.
-
-store_queue_without_recover_in_mnesia(Q) ->
-    QueueName = amqqueue:get_name(Q),
-    rabbit_misc:execute_mnesia_tx_with_tail(
-      fun () ->
-              case mnesia:wread({rabbit_queue, QueueName}) of
-                  [] ->
-                      case not_found_or_absent_in_mnesia(QueueName) of
-                          not_found           -> Q1 = rabbit_policy:set(Q),
-                                                 Q2 = amqqueue:set_state(Q1, live),
-                                                 ok = store_queue(Q2),
-                                                 fun () -> {created, Q2} end;
-                          {absent, _Q, _} = R -> rabbit_misc:const(R)
-                      end;
-                  [ExistingQ] ->
-                      rabbit_misc:const({existing, ExistingQ})
-              end
-      end).
-
-store_queue_without_recover_in_khepri(Q) ->
-    QueueName = amqqueue:get_name(Q),
-    Path = khepri_queue_path(QueueName),
-    DurablePath = khepri_durable_queue_path(QueueName),
-    Q1 = amqqueue:set_state(rabbit_policy:set(Q), live),
-    Decorators = rabbit_queue_decorator:active(Q1),
-    DurableQueue = amqqueue:reset_mirroring_and_decorators(Q1),
-    NonDurableQueue = amqqueue:set_decorators(Q1, Decorators),
-    rabbit_khepri:transaction(
-      fun() ->
-              case khepri_tx:get(Path) of
-                  {ok, #{Path := #{data := ExistingQ}}} ->
-                      khepri_tx:abort({existing, ExistingQ});
-                  _ ->
-                      case not_found_or_absent_in_khepri(QueueName) of
-                          not_found ->
-                              case ?amqqueue_is_durable(DurableQueue) of
-                                  true ->
-                                      store_queue_as_is_in_khepri(DurablePath, DurableQueue);
-                                  false ->
-                                      ok
-                              end,
-                              store_queue_as_is_in_khepri(Path, NonDurableQueue),
-                              {created, DurableQueue};
-                          {absent, _, _} = R ->
-                              khepri_tx:abort(R)
-                      end
-              end
-      end).
+store_queue(Q0) ->
+    Q = rabbit_queue_decorator:set(Q0),
+    DurableQ = amqqueue:reset_mirroring_and_decorators(Q0),
+    rabbit_store:store_queue(DurableQ, Q).
 
 -spec update
         (name(), fun((amqqueue:amqqueue()) -> amqqueue:amqqueue())) ->
             'not_found' | amqqueue:amqqueue().
 
 update(Name, Fun) ->
-    rabbit_khepri:try_mnesia_or_khepri(
-      fun() -> update_in_mnesia(Name, Fun) end,
-      fun() -> update_in_khepri(Name, Fun) end).
-
-update(Name, Fun, mnesia) ->
-    update_in_mnesia(Name, Fun);
-update(Name, Fun, khepri) ->
-    update_in_khepri(Name, Fun).
-
-update_in_tx(Name, Fun) ->
-    rabbit_khepri:try_mnesia_or_khepri(
-      fun() -> rabbit_misc:execute_mnesia_transaction(
-                 fun() ->
-                         update_in_mnesia(Name, Fun)
-                 end)
-      end,
-      fun() -> rabbit_khepri:transaction(
-                 fun() ->
-                         update_in_khepri(Name, Fun)
-                 end, rw)
-      end).
-
-update_in_mnesia(Name, Fun) ->
-    case mnesia:wread({rabbit_queue, Name}) of
-        [Q] ->
-            Durable = amqqueue:is_durable(Q),
-            Q1 = Fun(Q),
-            ok = mnesia:write(rabbit_queue, Q1, write),
-            case Durable of
-                true -> ok = mnesia:write(rabbit_durable_queue, Q1, write);
-                _    -> ok
-            end,
-            Q1;
-        [] ->
-            not_found
-    end.
-
-update_in_khepri(Name, Fun) ->
-    Path = khepri_queue_path(Name),
-    case khepri_tx:get(Path) of
-        {ok, #{Path := #{data := Q}}} ->
-            Durable = amqqueue:is_durable(Q),
-            Q1 = Fun(Q),
-            {ok, _} = khepri_tx:put(Path, Q1),
-            case Durable of
-                true ->
-                    DurablePath = khepri_durable_queue_path(Name),
-                    {ok, _} = khepri_tx:put(DurablePath, Q1);
-                _ ->
-                    ok
-            end,
-            Q1;
-        _  ->
-            not_found
-    end.
+    rabbit_store:update_queue(Name, Fun).
 
 %% only really used for quorum queues to ensure the rabbit_queue record
 %% is initialised
 ensure_rabbit_queue_record_is_initialized(Q) ->
-    ?try_mnesia_tx_or_upgrade_amqqueue_and_retry(
-       do_ensure_rabbit_queue_record_is_initialized(Q),
+    ?try_tx_or_upgrade_amqqueue_and_retry(
+       store_queue(Q),
        begin
            Q1 = amqqueue:upgrade(Q),
-           do_ensure_rabbit_queue_record_is_initialized(Q1)
+           store_queue(Q1)
        end).
-
-do_ensure_rabbit_queue_record_is_initialized(Q) ->
-    rabbit_khepri:try_mnesia_or_khepri(
-      fun() -> do_ensure_rabbit_queue_record_is_initialized_in_mnesia(Q) end,
-      fun() -> do_ensure_rabbit_queue_record_is_initialized_in_khepri(Q) end).
-
-do_ensure_rabbit_queue_record_is_initialized_in_mnesia(Q) ->
-    rabbit_misc:execute_mnesia_tx_with_tail(
-      fun () ->
-              ok = store_queue(Q),
-              rabbit_misc:const({ok, Q})
-      end).
-
-do_ensure_rabbit_queue_record_is_initialized_in_khepri(Q) ->
-    store_queue_in_khepri_tx(Q).
-
--spec store_queue(amqqueue:amqqueue()) -> 'ok'.
-
-store_queue(Q) when ?amqqueue_is_durable(Q) ->
-    Q1 = amqqueue:reset_mirroring_and_decorators(Q),
-    ok = mnesia:write(rabbit_durable_queue, Q1, write),
-    store_queue_ram(Q);
-store_queue(Q) when not ?amqqueue_is_durable(Q) ->
-    store_queue_ram(Q).
-
-store_queue_ram(Q) ->
-    ok = mnesia:write(rabbit_queue, rabbit_queue_decorator:set(Q), write).
-
-store_queue_ram_dirty(Q) ->
-    ok = mnesia:dirty_write(rabbit_queue, rabbit_queue_decorator:set(Q)).
 
 -spec update_decorators(name()) -> 'ok'.
 
 update_decorators(Name) ->
-    rabbit_khepri:try_mnesia_or_khepri(
-      fun() -> update_decorators_in_mnesia(Name) end,
-      fun() -> update_decorators_in_khepri(Name) end).
-
-update_decorators_in_mnesia(Name) ->
-    rabbit_misc:execute_mnesia_transaction(
-      fun() ->
-              case mnesia:wread({rabbit_queue, Name}) of
-                  [Q] -> store_queue_ram(Q),
-                         ok;
-                  []  -> ok
-              end
-      end).
-
-update_decorators_in_khepri(Name) ->
-    Path = khepri_queue_path(Name),
-    %% Decorators are stored on an ETS table, we need to query them before the transaction.
-    %% Also, to verify which ones are active could lead to any kind of side-effects.
-    %% Thus it needs to be done outside of the transaction
-    Decorators = case rabbit_khepri:get(Path) of
-                     {ok, #{Path := #{data := Q}}} ->
-                         rabbit_queue_decorator:active(Q);
-                     _ ->
-                         []
-                 end,
-    rabbit_khepri:transaction(
-      fun() ->
-              case khepri_tx:get(Path) of
-                  {ok, #{Path := #{data := Q0}}} ->
-                      Q1 = amqqueue:reset_mirroring_and_decorators(Q0),
-                      Q2 = amqqueue:set_decorators(Q1, Decorators),
-                      store_queue_as_is_in_khepri(Path, Q2),
-                      ok;
-                  _  ->
-                      ok
-              end
-      end, rw).
+    rabbit_store:update_queue_decorators(Name).
 
 -spec policy_changed(amqqueue:amqqueue(), amqqueue:amqqueue()) ->
           'ok'.
@@ -630,95 +329,10 @@ is_server_named_allowed(Args) ->
 lookup([]) ->
     []; %% optimisation
 lookup(Names) ->
-    lookup(rabbit_queue, Names).
-
-lookup(Table, Names) ->
-    rabbit_khepri:try_mnesia_or_khepri(
-      fun() -> lookup_in_mnesia(Table, Names) end,
-      fun() -> lookup_in_khepri(Table, Names) end).
-
-lookup_in_mnesia(Table, [Name]) -> ets:lookup(Table, Name); %% optimisation
-lookup_in_mnesia(Table, Names) when is_list(Names) ->
-    %% Normally we'd call mnesia:dirty_read/1 here, but that is quite
-    %% expensive for reasons explained in rabbit_misc:dirty_read/1.
-    lists:append([ets:lookup(Table, Name) || Name <- Names]);
-lookup_in_mnesia(Table, Name) ->
-    rabbit_misc:dirty_read({Table, Name}).
-
-lookup_in_khepri(Table, [Name]) ->
-    as_list(lookup_in_khepri(Table, Name));
-lookup_in_khepri(Table, Names) when is_list(Names) ->
-    lists:append([as_list(lookup_in_khepri(Table, Name)) || Name <- Names]);
-lookup_in_khepri(Table, Name) ->
-    Path = mnesia_table_to_khepri_path(Table, Name),
-    case rabbit_khepri:get_data(Path) of
-        {ok, Q} -> {ok, Q};
-        _  -> {error, not_found}
-    end.
-
-as_list({ok, Q}) ->
-    [Q];
-as_list(_) ->
-    [].
-
-lookup_as_list_in_khepri(Table, Name) ->
-    Path = mnesia_table_to_khepri_path(Table, Name),
-    case khepri_tx:get(Path) of
-        {ok, #{Path := #{data := Q}}} -> [Q];
-        _  -> []
-    end.
+    rabbit_store:lookup_queues(Names).
 
 lookup_durable_queue(Name) ->
-    lookup(rabbit_durable_queue, Name).
-
--spec lookup_many ([name()]) -> [amqqueue:amqqueue()].
-
-lookup_many(Names) when is_list(Names) ->
-    lookup(Names).
-
--spec not_found_or_absent_in_mnesia(name()) -> not_found_or_absent().
-
-not_found_or_absent_in_mnesia(Name) ->
-    %% NB: we assume that the caller has already performed a lookup on
-    %% rabbit_queue and not found anything
-    case mnesia:read({rabbit_durable_queue, Name}) of
-        []  -> not_found;
-        [Q] -> {absent, Q, nodedown} %% Q exists on stopped node
-    end.
-
-%% TODO ensure the exported not_found_or_absent isn't used anywhere else or must support
-%% both khepri and mnesia
-not_found_or_absent_in_khepri(Name) ->
-    %% NB: we assume that the caller has already performed a lookup on
-    %% rabbit_queue and not found anything
-    Path = khepri_durable_queue_path(Name),
-    case khepri_tx:get(Path) of
-        {ok, #{Path := #{data := Q}}} -> {absent, Q, nodedown}; %% Q exists on stopped node
-        _  -> not_found
-    end.
-
--spec not_found_or_absent_dirty(name()) -> not_found_or_absent().
-
-not_found_or_absent_dirty(Name) ->
-    rabbit_khepri:try_mnesia_or_khepri(
-      fun() -> not_found_or_absent_dirty_in_mnesia(Name) end,
-      fun() ->
-              %% This might hit khepri cache, vs a full transaction
-              Path = khepri_durable_queue_path(Name),
-              case rabbit_khepri:get_data(Path) of
-                  {ok, Q} -> {absent, Q, nodedown}; %% Q exists on stopped node
-                  _  -> not_found
-              end
-      end).
-
-not_found_or_absent_dirty_in_mnesia(Name) ->
-    %% We should read from both tables inside a tx, to get a
-    %% consistent view. But the chances of an inconsistency are small,
-    %% and only affect the error kind.
-    case rabbit_misc:dirty_read({rabbit_durable_queue, Name}) of
-        {error, not_found} -> not_found;
-        {ok, Q}            -> {absent, Q, nodedown}
-    end.
+    rabbit_store:lookup_durable_queue(Name).
 
 -spec get_rebalance_lock(pid()) ->
     {true, {rebalance_queues, pid()}} | false.
@@ -910,7 +524,7 @@ with(#resource{} = Name, F, E, RetriesLeft) ->
               fun () -> retry_wait(Q, F, E, RetriesLeft) end,
               fun () -> F(Q) end);
         {error, not_found} ->
-            E(not_found_or_absent_dirty(Name))
+            E(rabbit_store:not_found_or_absent_queue_dirty(Name))
     end.
 
 -spec retry_wait(amqqueue:amqqueue(),
@@ -1323,56 +937,20 @@ check_queue_type(_Val, _Args) ->
 -spec list() -> [amqqueue:amqqueue()].
 
 list() ->
-    list_table(rabbit_queue).
+    rabbit_store:list_queues().
 
-list_table(TableName) ->
-    rabbit_khepri:try_mnesia_or_khepri(
-      fun() -> list_with_possible_retry_in_mnesia(fun() -> list_in_mnesia(TableName) end) end,
-      fun() -> list_with_possible_retry_in_khepri(fun() -> list_in_khepri(TableName) end) end).
-
-list_in_mnesia(Table) ->
-    mnesia:dirty_match_object(Table, amqqueue:pattern_match_all()).
-
-list_in_khepri(Table) ->
-    Path = mnesia_table_to_khepri_path(Table) ++ [?STAR_STAR],
-    case rabbit_khepri:list_child_data(Path) of
-        {ok, Queues} -> maps:values(Queues);
-        _            -> []
-    end.
+list_durable() ->
+    rabbit_store:list_durable_queues().
 
 -spec count() -> non_neg_integer().
 
 count() ->
-    rabbit_khepri:try_mnesia_or_khepri(
-      fun() -> count_in_mnesia() end,
-      fun() -> count_in_khepri() end).
-
-count_in_mnesia() ->
-    mnesia:table_info(rabbit_queue, size).
-
-count_in_khepri() ->
-    Path = khepri_queues_path(),
-    case rabbit_khepri:list_child_data(Path) of
-        {ok, Queues} -> length(Queues);
-        _            -> 0
-    end.
+    rabbit_store:count_queues().
 
 -spec list_names() -> [rabbit_amqqueue:name()].
 
 list_names() ->
-    rabbit_khepri:try_mnesia_or_khepri(
-      fun() -> list_names_in_mnesia() end,
-      fun() -> list_names_in_khepri() end).
-
-list_names_in_mnesia() ->
-    mnesia:dirty_all_keys(rabbit_queue).
-
-list_names_in_khepri() ->
-    Path = khepri_queues_path(),
-    case rabbit_khepri:list_child_nodes(Path) of
-        {ok, Result} -> Result;
-        _            -> []
-    end.
+    rabbit_store:list_queue_names().
 
 list_names(VHost) -> [amqqueue:get_name(Q) || Q <- list(VHost)].
 
@@ -1430,23 +1008,7 @@ list_by_type(classic) -> list_by_type(rabbit_classic_queue);
 list_by_type(quorum)  -> list_by_type(rabbit_quorum_queue);
 list_by_type(stream)  -> list_by_type(rabbit_stream_queue);
 list_by_type(Type) ->
-    rabbit_khepri:try_mnesia_or_khepri(
-      fun() -> list_by_type_in_mnesia(Type) end,
-      fun() -> list_by_type_in_khepri(Type) end).
-
-list_by_type_in_mnesia(Type) ->
-    {atomic, Qs} =
-        mnesia:sync_transaction(
-          fun () ->
-                  mnesia:match_object(rabbit_durable_queue,
-                                      amqqueue:pattern_match_on_type(Type),
-                                      read)
-          end),
-    Qs.
-
-list_by_type_in_khepri(Type) ->
-    {ok, Map} = rabbit_khepri:match([?MODULE, queues, #if_data_matches{pattern = amqqueue:pattern_match_on_type(Type)}]),
-    maps:fold(fun(_, #{data := Q}, Acc) -> [Q | Acc] end, [], Map).
+    rabbit_store:list_durable_queues_by_type(Type).
 
 -spec list_local_quorum_queue_names() -> [rabbit_amqqueue:name()].
 
@@ -1552,93 +1114,7 @@ is_in_virtual_host(Q, VHostName) ->
 
 -spec list(vhost:name()) -> [amqqueue:amqqueue()].
 list(VHostPath) ->
-    list(VHostPath, rabbit_queue).
-
-list(VHostPath, TableName) ->
-    rabbit_khepri:try_mnesia_or_khepri(
-      fun() -> list_with_possible_retry_in_mnesia(
-                 fun() -> list_in_mnesia(TableName, VHostPath) end)
-      end,
-      fun() -> list_with_possible_retry_in_khepri(
-                 fun() -> list_in_khepri(TableName, VHostPath) end)
-      end).
-
-list_in_mnesia(TableName, VHostPath) ->
-    mnesia:async_dirty(
-      fun () ->
-              mnesia:match_object(
-                TableName,
-                amqqueue:pattern_match_on_name(rabbit_misc:r(VHostPath, queue)),
-                read)
-      end).
-
-list_in_khepri(TableName, VHostPath) ->
-    Path = mnesia_table_to_khepri_path(TableName),
-    {ok, Map} = rabbit_khepri:match_and_get_data(Path ++ [VHostPath, ?STAR_STAR]),
-    maps:values(Map).
-
-list_in_khepri_tx(VHostPath) ->
-    Path = khepri_queues_path(),
-    {ok, Map} = rabbit_khepri:tx_match_and_get_data(Path ++ [VHostPath, ?STAR_STAR]),
-    maps:values(Map).
-
-list_with_possible_retry(Fun) ->
-    rabbit_khepri:try_mnesia_or_khepri(
-      fun() -> list_with_possible_retry_in_mnesia(Fun) end,
-      fun() -> list_with_possible_retry_in_mnesia(Fun) end).
-
-list_with_possible_retry_in_mnesia(Fun) ->
-    %% amqqueue migration:
-    %% The `rabbit_queue` or `rabbit_durable_queue` tables
-    %% might be migrated between the time we query the pattern
-    %% (with the `amqqueue` module) and the time we call
-    %% `mnesia:dirty_match_object()`. This would lead to an empty list
-    %% (no object matching the now incorrect pattern), not a Mnesia
-    %% error.
-    %%
-    %% So if the result is an empty list and the version of the
-    %% `amqqueue` record changed in between, we retry the operation.
-    %%
-    %% However, we don't do this if inside a Mnesia transaction: we
-    %% could end up with a live lock between this started transaction
-    %% and the Mnesia table migration which is blocked (but the
-    %% rabbit_feature_flags lock is held).
-    AmqqueueRecordVersion = amqqueue:record_version_to_use(),
-    case Fun() of
-        [] ->
-            case mnesia:is_transaction() of
-                true ->
-                    [];
-                false ->
-                    case amqqueue:record_version_to_use() of
-                        AmqqueueRecordVersion -> [];
-                        _                     -> Fun()
-                    end
-            end;
-        Ret ->
-            Ret
-    end.
-
-list_with_possible_retry_in_khepri(Fun) ->
-    %% See equivalent `list_with_possible_retry_in_mnesia` first.
-    %% Not sure how much of this is possible in Khepri, as there is no dirty read,
-    %% but the amqqueue record migration is still happening.
-    %% Let's retry just in case
-    AmqqueueRecordVersion = amqqueue:record_version_to_use(),
-    case Fun() of
-        [] ->
-            case khepri_tx:is_transaction() of
-                true ->
-                    [];
-                false ->
-                    case amqqueue:record_version_to_use() of
-                        AmqqueueRecordVersion -> [];
-                        _                     -> Fun()
-                    end
-            end;
-        Ret ->
-            Ret
-    end.
+    rabbit_store:list_queues(VHostPath).
 
 -spec list_down(rabbit_types:vhost()) -> [amqqueue:amqqueue()].
 
@@ -1646,8 +1122,8 @@ list_down(VHostPath) ->
     case rabbit_vhost:exists(VHostPath) of
         false -> [];
         true  ->
-            Present = list(VHostPath),
-            Durable = list(VHostPath, rabbit_durable_queue),
+            Present = rabbit_store:list_queues(VHostPath),
+            Durable = rabbit_store:list_durable_queues(VHostPath),
             PresentS = sets:from_list([amqqueue:get_name(Q) || Q <- Present]),
             sets:to_list(sets:filter(fun (Q) ->
                                              N = amqqueue:get_name(Q),
@@ -1656,35 +1132,7 @@ list_down(VHostPath) ->
     end.
 
 count(VHost) ->
-  try
-    %% this is certainly suboptimal but there is no way to count
-    %% things using a secondary index in Mnesia. Our counter-table-per-node
-    %% won't work here because with master migration of mirrored queues
-    %% the "ownership" of queues by nodes becomes a non-trivial problem
-    %% that requires a proper consensus algorithm.
-    length(list_for_count(VHost))
-  catch _:Err ->
-    rabbit_log:error("Failed to fetch number of queues in vhost ~p:~n~p",
-                     [VHost, Err]),
-    0
-  end.
-
-list_for_count(VHost) ->
-    rabbit_khepri:try_mnesia_or_khepri(
-      fun() ->
-              list_with_possible_retry_in_mnesia(
-                fun() ->
-                        mnesia:dirty_index_read(rabbit_queue,
-                                                VHost,
-                                                amqqueue:field_vhost())
-                end)
-      end,
-      fun() ->
-              list_with_possible_retry_in_khepri(
-                fun() ->
-                        list_in_khepri(rabbit_queue, VHost)
-                end)
-      end).
+    rabbit_store:count_queues(VHost).
 
 -spec info_keys() -> rabbit_types:info_keys().
 
@@ -2094,100 +1542,19 @@ notify_sent_queue_down(QPid) ->
 resume(QPid, ChPid) -> delegate:invoke_no_result(QPid, {gen_server2, cast,
                                                         [{resume, ChPid}]}).
 
-internal_delete1(QueueName, OnlyDurable) ->
-    internal_delete1(QueueName, OnlyDurable, normal).
-
-internal_delete1(QueueName, OnlyDurable, Reason) ->
-    rabbit_khepri:try_mnesia_or_khepri(
-      fun() ->
-              internal_delete1_in_mnesia(QueueName, OnlyDurable, Reason)
-      end,
-      fun() ->
-              internal_delete1_in_khepri(QueueName, OnlyDurable, Reason)
-      end).
-
-internal_delete1_in_mnesia(QueueName, OnlyDurable, Reason) ->
-    ok = mnesia:delete({rabbit_queue, QueueName}),
-    case Reason of
-        auto_delete ->
-            case mnesia:wread({rabbit_durable_queue, QueueName}) of
-                []  -> ok;
-                [_] -> ok = mnesia:delete({rabbit_durable_queue, QueueName})
-            end;
-        _ ->
-            mnesia:delete({rabbit_durable_queue, QueueName})
-    end,
-    %% we want to execute some things, as decided by rabbit_exchange,
-    %% after the transaction.
-    rabbit_binding:remove_for_destination_in_mnesia(QueueName, OnlyDurable).
-
-internal_delete1_in_khepri(QueueName, OnlyDurable, _Reason) ->
-    Path = mnesia_table_to_khepri_path(rabbit_queue, QueueName),
-    DurablePath = mnesia_table_to_khepri_path(rabbit_durable_queue, QueueName),
-    {ok, _} = khepri_tx:delete(Path),
-    {ok, _} = khepri_tx:delete(DurablePath),
-    %% we want to execute some things, as decided by rabbit_exchange,
-    %% after the transaction.
-    rabbit_binding:remove_for_destination_in_khepri(QueueName, OnlyDurable).
-
 -spec internal_delete(name(), rabbit_types:username()) -> 'ok'.
 
 internal_delete(QueueName, ActingUser) ->
     internal_delete(QueueName, ActingUser, normal).
 
 internal_delete(QueueName, ActingUser, Reason) ->
-    rabbit_khepri:try_mnesia_or_khepri(
-      fun() ->
-              internal_delete_in_mnesia(QueueName, ActingUser, Reason)
-      end,
-      fun() ->
-              internal_delete_in_khepri(QueueName, ActingUser, Reason)
-      end).
-
-internal_delete_in_mnesia(QueueName, ActingUser, Reason) ->
-    rabbit_misc:execute_mnesia_tx_with_tail(
-      fun () ->
-              case {mnesia:wread({rabbit_queue, QueueName}),
-                    mnesia:wread({rabbit_durable_queue, QueueName})} of
-                  {[], []} ->
-                      rabbit_misc:const(ok);
-                  _ ->
-                      Deletions = internal_delete1_in_mnesia(QueueName, false, Reason),
-                      T = rabbit_binding:process_deletions(Deletions,
-                                                           ?INTERNAL_USER),
-                      fun() ->
-                              ok = T(),
-                              rabbit_core_metrics:queue_deleted(QueueName),
-                              ok = rabbit_event:notify(queue_deleted,
-                                                       [{name, QueueName},
-                                                        {user_who_performed_action, ActingUser}])
-                      end
-              end
-      end).
-
-internal_delete_in_khepri(QueueName, ActingUser, Reason) ->
-    case rabbit_khepri:transaction(
-           fun () ->
-                   case {lookup_as_list_in_khepri(rabbit_queue, QueueName),
-                         lookup_as_list_in_khepri(rabbit_durable_queue, QueueName)} of
-                       {[], []} ->
-                           ok;
-                       _ ->
-                           internal_delete1_in_khepri(QueueName, false, Reason)
-                   end
-           end, rw) of
+    case rabbit_store:delete_queue(QueueName, Reason) of
         ok ->
             ok;
         Deletions ->
-            %% TODO this is a bunch of notifications, and maybe something else?
-            %% It can't happen inside of the transaction :scream:
-            T = rabbit_binding:process_deletions(Deletions,
-                                                 ?INTERNAL_USER),
-            ok = T(),
-            %% TODO core metrics ops are ETS ops. They can't happen
-            %% inside of a transaction
+            rabbit_binding:process_deletions(Deletions, false),
+            rabbit_binding:notify_deletions(Deletions, ?INTERNAL_USER),
             rabbit_core_metrics:queue_deleted(QueueName),
-            %% TODO we can't do this notification inside a transaction
             ok = rabbit_event:notify(queue_deleted,
                                      [{name, QueueName},
                                       {user_who_performed_action, ActingUser}])
@@ -2227,7 +1594,7 @@ forget_node_for_queue(_DeadNode, [], Q) ->
     %% Don't process_deletions since that just calls callbacks and we
     %% are not really up.
     Name = amqqueue:get_name(Q),
-    internal_delete1(Name, true);
+    rabbit_store:internal_delete_queue(Name, true, normal);
 
 %% Should not happen, but let's be conservative.
 forget_node_for_queue(DeadNode, [DeadNode | T], Q) ->
@@ -2374,41 +1741,36 @@ maybe_clear_recoverable_node(Node, Q) ->
 -spec on_node_down(node()) -> 'ok'.
 
 on_node_down(Node) ->
-    {Time, {QueueNames, QueueDeletions}} = timer:tc(fun() -> delete_queues_on_node_down(Node) end),
+    {Time, {QueueNames, Deletions}} = timer:tc(fun() -> delete_queues_on_node_down(Node) end),
     case length(QueueNames) of
         0 -> ok;
         _ -> rabbit_log:info("~p transient queues from an old incarnation of node ~p deleted in ~fs", [length(QueueNames), Node, Time/1000000])
     end,
-    notify_queue_binding_deletions(QueueDeletions),
+    notify_queue_binding_deletions(Deletions),
     rabbit_core_metrics:queues_deleted(QueueNames),
     notify_queues_deleted(QueueNames),
     ok.
 
+notify_queue_binding_deletions(QueueDeletions) when is_list(QueueDeletions) ->
+    Deletions = rabbit_binding:process_deletions(
+                  lists:foldl(fun rabbit_binding:combine_deletions/2,
+                              rabbit_binding:new_deletions(),
+                              QueueDeletions), false),
+    rabbit_binding:notify_deletions(Deletions, ?INTERNAL_USER);
+notify_queue_binding_deletions(QueueDeletions) ->
+    Deletions = rabbit_binding:process_deletions(QueueDeletions, false),
+    rabbit_binding:notify_deletions(Deletions, ?INTERNAL_USER).
+
 delete_queues_on_node_down(Node) ->
-    rabbit_khepri:try_mnesia_or_khepri(
-      fun() ->
-              Partitions = partition_queues(queues_to_delete_when_node_down_in_mnesia(Node)),
-              lists:unzip(lists:flatten(
-                            [rabbit_misc:execute_mnesia_transaction(
-                               fun () -> [{Queue, delete_queue_in_mnesia(Queue)} || Queue <- Queues] end
-                              ) || Queues <- Partitions]
-                           ))
-      end,
-      fun() ->
-              Queues = queues_to_delete_when_node_down_in_khepri(Node),
-              lists:unzip(rabbit_khepri:transaction(
-                            fun() ->
-                                    [{Queue, delete_queue_in_khepri(Queue)} || Queue <- Queues]
-                            end, rw))
-      end).   
-
-delete_queue_in_mnesia(QueueName) ->
-    ok = mnesia:delete({rabbit_queue, QueueName}),
-    rabbit_binding:remove_transient_for_destination_in_mnesia(QueueName).
-
-delete_queue_in_khepri(QueueName) ->
-    {ok, _} = khepri_tx:delete(khepri_queue_path(QueueName)),
-    rabbit_binding:remove_transient_for_destination_in_khepri(QueueName).
+    %% TODO partitions are probably not necessary for Khepri, but leave it like this until we
+    %% do more testing
+    Partitions = partition_queues(queues_to_delete_when_node_down(Node)),
+    lists:unzip(lists:flatten(
+                  [case rabbit_store:delete_transient_queues(Queues) of
+                       {error, noproc} -> [];
+                       Value -> Value
+                   end || Queues <- Partitions]
+                 )).
 
 % If there are many queues and we delete them all in a single Mnesia transaction,
 % this can block all other Mnesia operations for a really long time.
@@ -2423,49 +1785,19 @@ partition_queues([Q0,Q1,Q2,Q3,Q4,Q5,Q6,Q7,Q8,Q9 | T]) ->
 partition_queues(T) ->
     [T].
 
-queues_to_delete_when_node_down_in_mnesia(NodeDown) ->
-    rabbit_misc:execute_mnesia_transaction(fun () ->
-        qlc:e(qlc:q([amqqueue:get_name(Q) ||
-            Q <- mnesia:table(rabbit_queue),
-                amqqueue:qnode(Q) == NodeDown andalso
-                not rabbit_mnesia:is_process_alive(amqqueue:get_pid(Q)) andalso
-                (not rabbit_amqqueue:is_replicated(Q) orelse
-                rabbit_amqqueue:is_dead_exclusive(Q))]
-        ))
-    end).
-
-queues_to_delete_when_node_down_in_khepri(NodeDown) ->
-    Path = khepri_queues_path(),
-    case rabbit_khepri:list_child_data(Path) of
-        {ok, Queues} ->
-            maps:fold(fun(_K, Q, Acc) ->
-                              case amqqueue:qnode(Q) == NodeDown andalso
-                                  not rabbit_mnesia:is_process_alive(amqqueue:get_pid(Q)) andalso
-                                  (not rabbit_amqqueue:is_replicated(Q) orelse
-                                   rabbit_amqqueue:is_dead_exclusive(Q)) of
-                                  true ->
-                                      [amqqueue:get_name(Q) | Acc];
-                                  false ->
-                                      Acc
-                              end
-                      end, [], Queues);
-        _ ->
-            []
-    end.
-
-notify_queue_binding_deletions(QueueDeletions) ->
-    rabbit_misc:execute_mnesia_tx_with_tail(
-        fun() ->
-            rabbit_binding:process_deletions(
-                lists:foldl(
-                    fun rabbit_binding:combine_deletions/2,
-                    rabbit_binding:new_deletions(),
-                    QueueDeletions
-                ),
-                ?INTERNAL_USER
-            )
-        end
-    ).
+queues_to_delete_when_node_down(NodeDown) ->
+    Qs = rabbit_store:list_queues(),
+    lists:foldl(fun(Q, Acc) ->
+                        case amqqueue:qnode(Q) == NodeDown andalso
+                            not rabbit_mnesia:is_process_alive(amqqueue:get_pid(Q)) andalso
+                            (not rabbit_amqqueue:is_replicated(Q) orelse
+                             rabbit_amqqueue:is_dead_exclusive(Q)) of
+                            true ->
+                                [amqqueue:get_name(Q) | Acc];
+                            false ->
+                                Acc
+                        end
+                end, [], Qs).
 
 notify_queues_deleted(QueueDeletions) ->
     lists:foreach(
@@ -2513,81 +1845,4 @@ get_quorum_nodes(Q) ->
             Nodes;
         _ ->
             []
-    end.
-
-khepri_queues_path() ->
-    [?MODULE, queues].
-khepri_queue_path(#resource{virtual_host = VHost, name = Name}) ->
-    [?MODULE, queues, VHost, Name].
-
-khepri_durable_queues_path() ->
-    [?MODULE, durable_queues].
-
-khepri_durable_queue_path(#resource{virtual_host = VHost, name = Name}) ->
-    [?MODULE, durable_queues, VHost, Name].
-
-mnesia_table_to_khepri_path(rabbit_durable_queue) ->
-    khepri_durable_queues_path();
-mnesia_table_to_khepri_path(rabbit_queue) ->
-    khepri_queues_path().
-
-mnesia_table_to_khepri_path(rabbit_durable_queue, QName) ->
-    khepri_durable_queue_path(QName);
-mnesia_table_to_khepri_path(rabbit_queue, QName) ->
-    khepri_queue_path(QName).
-
-mnesia_write_queue_to_khepri(Q) ->
-    Path = khepri_queue_path(amqqueue:get_name(Q)),
-    case rabbit_khepri:put(Path, Q) of
-        {ok, _} -> ok;
-        Error -> throw(Error)
-    end.
-
-mnesia_write_durable_queue_to_khepri(Q) ->
-    Path = khepri_durable_queue_path(amqqueue:get_name(Q)),
-    case rabbit_khepri:put(Path, Q) of
-        {ok, _} -> ok;
-        Error -> throw(Error)
-    end.
-
-mnesia_delete_queue_to_khepri(Q) ->
-    Path = khepri_queue_path(amqqueue:get_name(Q)),
-    case rabbit_khepri:delete(Path) of
-        {ok, _} -> ok;
-        Error -> throw(Error)
-    end.
-
-mnesia_delete_durable_queue_to_khepri(Q) ->
-    Path = khepri_queue_path(amqqueue:get_name(Q)),
-    case rabbit_khepri:delete(Path) of
-        {ok, _} -> ok;
-        Error -> throw(Error)
-    end.
-
-clear_queue_data_in_khepri() ->
-    Path = khepri_queues_path(),
-    case rabbit_khepri:delete(Path) of
-        {ok, _} -> ok;
-        Error -> throw(Error)
-    end.
-
-clear_durable_queue_data_in_khepri() ->
-    Path = khepri_durable_queues_path(),
-    case rabbit_khepri:delete(Path) of
-        {ok, _} -> ok;
-        Error -> throw(Error)
-    end.
-
-mnesia_delete_to_khepri(#resource{} = Name) ->
-    Path = khepri_queue_path(Name),
-    case rabbit_khepri:delete(Path) of
-        {ok, _} -> ok;
-        Error -> throw(Error)
-    end.
-
-mnesia_delete_durable_to_khepri(#resource{} = Name) ->
-    Path = khepri_durable_queue_path(Name),
-    case rabbit_khepri:delete(Path) of
-        {ok, _} -> ok;
-        Error -> throw(Error)
     end.

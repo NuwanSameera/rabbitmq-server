@@ -512,39 +512,39 @@ clear_data_from_previous_attempt(
     clear_data_from_previous_attempt(FeatureName, Rest);
 clear_data_from_previous_attempt(
   FeatureName, [rabbit_exchange | Rest]) ->
-    ok = rabbit_exchange:clear_exchange_data_in_khepri(),
+    ok = rabbit_store:clear_exchange_data_in_khepri(),
     clear_data_from_previous_attempt(FeatureName, Rest);
 clear_data_from_previous_attempt(
   FeatureName, [rabbit_durable_exchange | Rest]) ->
-    ok = rabbit_exchange:clear_durable_exchange_data_in_khepri(),
+    ok = rabbit_store:clear_durable_exchange_data_in_khepri(),
     clear_data_from_previous_attempt(FeatureName, Rest);
 clear_data_from_previous_attempt(
   FeatureName, [rabbit_exchange_serial | Rest]) ->
-    ok = rabbit_exchange:clear_exchange_serial_data_in_khepri(),
+    ok = rabbit_store:clear_exchange_serial_data_in_khepri(),
     clear_data_from_previous_attempt(FeatureName, Rest);
 clear_data_from_previous_attempt(
   FeatureName, [rabbit_queue | Rest]) ->
-    ok = rabbit_amqqueue:clear_queue_data_in_khepri(),
+    ok = rabbit_store:clear_queue_data_in_khepri(),
     clear_data_from_previous_attempt(FeatureName, Rest);
 clear_data_from_previous_attempt(
   FeatureName, [rabbit_durable_queue | Rest]) ->
-    ok = rabbit_amqqueue:clear_durable_queue_data_in_khepri(),
+    ok = rabbit_store:clear_durable_queue_data_in_khepri(),
     clear_data_from_previous_attempt(FeatureName, Rest);
 clear_data_from_previous_attempt(
   FeatureName, [rabbit_durable_route | Rest]) ->
-    ok = rabbit_binding:clear_route_in_khepri(),
+    ok = rabbit_store:clear_route_in_khepri(),
     clear_data_from_previous_attempt(FeatureName, Rest);
 clear_data_from_previous_attempt(
   FeatureName, [rabbit_semi_durable_route | Rest]) ->
-    ok = rabbit_binding:clear_route_in_khepri(),
+    ok = rabbit_store:clear_route_in_khepri(),
     clear_data_from_previous_attempt(FeatureName, Rest);
 clear_data_from_previous_attempt(
   FeatureName, [rabbit_route | Rest]) ->
-    ok = rabbit_binding:clear_route_in_khepri(),
+    ok = rabbit_store:clear_route_in_khepri(),
     clear_data_from_previous_attempt(FeatureName, Rest);
 clear_data_from_previous_attempt(
   FeatureName, [rabbit_reverse_route | Rest]) ->
-    ok = rabbit_binding:clear_route_in_khepri(),
+    ok = rabbit_store:clear_route_in_khepri(),
     clear_data_from_previous_attempt(FeatureName, Rest);
 clear_data_from_previous_attempt(
   FeatureName, [rabbit_topic_trie_node | Rest]) ->
@@ -554,11 +554,11 @@ clear_data_from_previous_attempt(
     clear_data_from_previous_attempt(FeatureName, Rest);
 clear_data_from_previous_attempt(
   FeatureName, [rabbit_topic_trie_binding | Rest]) ->
-    ok = rabbit_exchange_type_topic:clear_data_in_khepri(),
+    ok = rabbit_store:clear_topic_trie_binding_data_in_khepri(),
     clear_data_from_previous_attempt(FeatureName, Rest);
 clear_data_from_previous_attempt(
   FeatureName, [rabbit_listener | Rest]) ->
-    ok = rabbit_networking:clear_data_in_khepri(),
+    ok = rabbit_store:clear_listener_data_in_khepri(),
     clear_data_from_previous_attempt(FeatureName, Rest);
 clear_data_from_previous_attempt(_, []) ->
     ok.
@@ -612,47 +612,47 @@ copy_from_mnesia_to_khepri(
     copy_from_mnesia_to_khepri(FeatureName, Rest);
 copy_from_mnesia_to_khepri(
   FeatureName, [rabbit_queue = Table | Rest]) ->
-    Fun = fun rabbit_amqqueue:mnesia_write_queue_to_khepri/1,
+    Fun = fun rabbit_store:mnesia_write_queue_to_khepri/1,
     do_copy_from_mnesia_to_khepri(FeatureName, Table, Fun),
     copy_from_mnesia_to_khepri(FeatureName, Rest);
 copy_from_mnesia_to_khepri(
   FeatureName, [rabbit_durable_queue = Table | Rest]) ->
-    Fun = fun rabbit_amqqueue:mnesia_write_durable_queue_to_khepri/1,
+    Fun = fun rabbit_store:mnesia_write_durable_queue_to_khepri/1,
     do_copy_from_mnesia_to_khepri(FeatureName, Table, Fun),
     copy_from_mnesia_to_khepri(FeatureName, Rest);
 copy_from_mnesia_to_khepri(
   FeatureName, [rabbit_exchange = Table | Rest]) ->
-    Fun = fun rabbit_exchange:mnesia_write_exchange_to_khepri/1,
+    Fun = fun rabbit_store:mnesia_write_exchange_to_khepri/1,
     do_copy_from_mnesia_to_khepri(FeatureName, Table, Fun),
     copy_from_mnesia_to_khepri(FeatureName, Rest);
 copy_from_mnesia_to_khepri(
   FeatureName, [rabbit_durable_exchange = Table | Rest]) ->
-    Fun = fun rabbit_exchange:mnesia_write_durable_exchange_to_khepri/1,
+    Fun = fun rabbit_store:mnesia_write_durable_exchange_to_khepri/1,
     do_copy_from_mnesia_to_khepri(FeatureName, Table, Fun),
     copy_from_mnesia_to_khepri(FeatureName, Rest);
 copy_from_mnesia_to_khepri(
   FeatureName, [rabbit_exchange_serial = Table | Rest]) ->
-    Fun = fun rabbit_exchange:mnesia_write_exchange_serial_to_khepri/1,
+    Fun = fun rabbit_store:mnesia_write_exchange_serial_to_khepri/1,
     do_copy_from_mnesia_to_khepri(FeatureName, Table, Fun),
     copy_from_mnesia_to_khepri(FeatureName, Rest);
 copy_from_mnesia_to_khepri(
   FeatureName, [rabbit_durable_route = Table | Rest]) ->
-    Fun = fun rabbit_binding:mnesia_write_durable_route_to_khepri/1,
+    Fun = fun rabbit_store:mnesia_write_durable_route_to_khepri/1,
     do_copy_from_mnesia_to_khepri(FeatureName, Table, Fun),
     copy_from_mnesia_to_khepri(FeatureName, Rest);
 copy_from_mnesia_to_khepri(
   FeatureName, [rabbit_semi_durable_route = Table | Rest]) ->
-    Fun = fun rabbit_binding:mnesia_write_semi_durable_route_to_khepri/1,
+    Fun = fun rabbit_store:mnesia_write_semi_durable_route_to_khepri/1,
     do_copy_from_mnesia_to_khepri(FeatureName, Table, Fun),
     copy_from_mnesia_to_khepri(FeatureName, Rest);
 copy_from_mnesia_to_khepri(
   FeatureName, [rabbit_route = Table | Rest]) ->
-    Fun = fun rabbit_binding:mnesia_write_route_to_khepri/1,
+    Fun = fun rabbit_store:mnesia_write_route_to_khepri/1,
     do_copy_from_mnesia_to_khepri(FeatureName, Table, Fun),
     copy_from_mnesia_to_khepri(FeatureName, Rest);
 copy_from_mnesia_to_khepri(
   FeatureName, [rabbit_reverse_route = Table | Rest]) ->
-    Fun = fun rabbit_binding:mnesia_write_reverse_route_to_khepri/1,
+    Fun = fun rabbit_store:mnesia_write_reverse_route_to_khepri/1,
     do_copy_from_mnesia_to_khepri(FeatureName, Table, Fun),
     copy_from_mnesia_to_khepri(FeatureName, Rest);
 copy_from_mnesia_to_khepri(
@@ -667,12 +667,12 @@ copy_from_mnesia_to_khepri(
     copy_from_mnesia_to_khepri(FeatureName, Rest);
 copy_from_mnesia_to_khepri(
   FeatureName, [rabbit_topic_trie_binding = Table | Rest]) ->
-    Fun = fun rabbit_exchange_type_topic:mnesia_write_to_khepri/1,
+    Fun = fun rabbit_store:mnesia_write_topic_trie_binding_to_khepri/1,
     do_copy_from_mnesia_to_khepri(FeatureName, Table, Fun),
     copy_from_mnesia_to_khepri(FeatureName, Rest);
 copy_from_mnesia_to_khepri(
   FeatureName, [rabbit_listener = Table | Rest]) ->
-    Fun = fun rabbit_networking:mnesia_write_to_khepri/1,
+    Fun = fun rabbit_store:mnesia_write_listener_to_khepri/1,
     do_copy_from_mnesia_to_khepri(FeatureName, Table, Fun),
     copy_from_mnesia_to_khepri(FeatureName, Rest);
 copy_from_mnesia_to_khepri(_, []) ->
@@ -810,9 +810,9 @@ handle_mnesia_delete(rabbit_topic_permission, TopicPermissionKey) ->
 handle_mnesia_delete(rabbit_runtime_parameters, RuntimeParamKey) ->
     rabbit_runtime_parameters:mnesia_delete_to_khepri(RuntimeParamKey);
 handle_mnesia_delete(rabbit_queue, QName) ->
-    rabbit_amqqueue:mnesia_delete_to_khepri(QName);
+    rabbit_store:mnesia_delete_queue_to_khepri(QName);
 handle_mnesia_delete(rabbit_durable_queue, QName) ->
-    rabbit_amqqueue:mnesia_delete_durable_to_khepri(QName).
+    rabbit_store:mnesia_delete_durable_queue_to_khepri(QName).
 
 
 %% We can't remove unused tables at this point yet. The reason is that tables

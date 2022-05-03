@@ -250,29 +250,15 @@ recover() ->
 %% recovery has not yet happened; we must work with the rabbit_durable_<thing>
 %% variants.
 recover0() ->
-    Xs0 = rabbit_khepri:try_mnesia_or_khepri(
-            fun() -> rabbit_exchange:list_in_mnesia(rabbit_durable_exchange) end,
-            fun() -> rabbit_exchange:list_durable_in_khepri() end),
+    Xs0 = rabbit_store:list_durable_exchanges(),
     Policies = list(),
     OpPolicies = list_op(),
     Xs = [rabbit_exchange_decorator:set(
             X#exchange{policy = match(Name, Policies),
                        operator_policy = match(Name, OpPolicies)})
           || X = #exchange{name = Name} <- Xs0],
-    Qs = rabbit_amqqueue:list_table(rabbit_durable_queue),
-    rabbit_khepri:try_mnesia_or_khepri(
-      fun() ->
-              [rabbit_misc:execute_mnesia_transaction(
-                 fun () ->
-                         mnesia:write(rabbit_durable_exchange, X, write)
-                 end) || X <- Xs]
-      end,
-      fun() ->
-              rabbit_khepri:transaction(
-                fun() ->
-                        [rabbit_exchange:store_in_khepri(X, rabbit_durable_exchange) || X <- Xs]
-                end, rw)
-      end),
+    Qs = rabbit_amqqueue:list_durable(),
+    rabbit_store:store_durable_exchanges(Xs),
     [begin
          QName = amqqueue:get_name(Q0),
          Policy1 = match(QName, Policies),
@@ -280,29 +266,12 @@ recover0() ->
          OpPolicy1 = match(QName, OpPolicies),
          Q2 = amqqueue:set_operator_policy(Q1, OpPolicy1),
          Q3 = rabbit_queue_decorator:set(Q2),
-         rabbit_khepri:try_mnesia_or_khepri(
-           fun() ->
-                   ?try_mnesia_tx_or_upgrade_amqqueue_and_retry(
-                      rabbit_misc:execute_mnesia_transaction(
-                        fun () ->
-                                mnesia:write(rabbit_durable_queue, Q3, write)
-                        end),
-                      begin
-                          Q4 = amqqueue:upgrade(Q3),
-                          rabbit_misc:execute_mnesia_transaction(
-                            fun () ->
-                                    mnesia:write(rabbit_durable_queue, Q4, write)
-                            end)
-                      end)
-           end,
-           fun() ->
-                   ?try_mnesia_tx_or_upgrade_amqqueue_and_retry(
-                      rabbit_amqqueue:store_queue_in_khepri(Q3, rabbit_durable_queue),
-                      begin
-                          Q4 = amqqueue:upgrade(Q3),
-                          rabbit_amqqueue:store_queue_in_khepri(Q4, rabbit_durable_queue)
-                      end)
-           end)
+         ?try_tx_or_upgrade_amqqueue_and_retry(
+            rabbit_store:store_durable_queue(Q3),
+            begin
+                Q4 = amqqueue:upgrade(Q3),
+                rabbit_store:store_durable_queue(Q4)
+            end)
      end || Q0 <- Qs],
     ok.
 
@@ -485,34 +454,34 @@ update_matched_objects_in_mnesia(VHost) ->
                 {'EXIT', Exit} ->
                     exit(Exit);
                 {Policies, OpPolicies} ->
-                    {[update_exchange(X, Policies, OpPolicies) ||
-                        X <- rabbit_exchange:list_in_mnesia(rabbit_exchange, VHost)],
-                    [update_queue(Q, Policies, OpPolicies) ||
-                        Q <- rabbit_amqqueue:list_in_mnesia(rabbit_queue, VHost)]}
+                    {[update_exchange_in_mnesia(X, Policies, OpPolicies) ||
+                        X <- rabbit_store:list_exchanges_in_mnesia(VHost)],
+                    [update_queue_in_mnesia(Q, Policies, OpPolicies) ||
+                        Q <- rabbit_store:list_queues_in_mnesia(VHost)]}
                 end
         end).
 
-update_exchange(X = #exchange{name = XName,
+update_exchange_in_mnesia(X = #exchange{name = XName,
                               policy = OldPolicy,
                               operator_policy = OldOpPolicy},
                 Policies, OpPolicies) ->
     case {match(XName, Policies), match(XName, OpPolicies)} of
         {OldPolicy, OldOpPolicy} -> no_change;
         {NewPolicy, NewOpPolicy} ->
-            NewExchange = rabbit_exchange:update(
-                XName,
-                fun(X0) ->
-                    rabbit_exchange_decorator:set(
-                        X0 #exchange{policy = NewPolicy,
-                                     operator_policy = NewOpPolicy})
-                    end),
+            NewExchange = rabbit_store:update_exchange_in_mnesia(
+                            XName,
+                            fun(X0) ->
+                                    rabbit_exchange_decorator:set(
+                                      X0 #exchange{policy = NewPolicy,
+                                                   operator_policy = NewOpPolicy})
+                            end),
             case NewExchange of
                 #exchange{} = X1 -> {X, X1};
                 not_found        -> {X, X }
             end
     end.
 
-update_queue(Q0, Policies, OpPolicies) when ?is_amqqueue(Q0) ->
+update_queue_in_mnesia(Q0, Policies, OpPolicies) when ?is_amqqueue(Q0) ->
     QName = amqqueue:get_name(Q0),
     OldPolicy = amqqueue:get_policy(Q0),
     OldOpPolicy = amqqueue:get_operator_policy(Q0),
@@ -526,7 +495,7 @@ update_queue(Q0, Policies, OpPolicies) when ?is_amqqueue(Q0) ->
                     QFun3 = amqqueue:set_policy_version(QFun2, NewPolicyVersion),
                     rabbit_queue_decorator:set(QFun3)
                 end,
-            NewQueue = rabbit_amqqueue:update(QName, F),
+            NewQueue = rabbit_store:update_queue_in_mnesia(QName, F),
             case NewQueue of
                  Q1 when ?is_amqqueue(Q1) ->
                     {Q0, Q1};
@@ -543,8 +512,8 @@ update_matched_objects_in_khepri(VHost) ->
                        {'EXIT', _} = Err ->
                            {error, Err};
                        {Policies, OpPolicies} ->
-                           Exchanges = rabbit_exchange:list_in_khepri_tx(VHost),
-                           Queues = rabbit_amqqueue:list_in_khepri_tx(VHost),
+                           Exchanges = rabbit_store:list_exchanges_in_khepri_tx(VHost),
+                           Queues = rabbit_store:list_queues_in_khepri_tx(VHost),
                            {ok, #{policies => Policies,
                                   op_policies => OpPolicies,
                                   exchanges => Exchanges,
@@ -563,16 +532,16 @@ update_matched_objects_in_khepri(VHost) ->
             Queues = [get_updated_queue(Q, Policies, OpPolicies) || Q <- Queues0],
             rabbit_khepri:transaction(
               fun() ->
-                      {[update_exchange(Map) || Map <- Exchanges, is_map(Map)],
-                       [update_queue(Map) || Map <- Queues, is_map(Map)]}
+                      {[update_exchange_in_khepri(Map) || Map <- Exchanges, is_map(Map)],
+                       [update_queue_in_khepri(Map) || Map <- Queues, is_map(Map)]}
               end, rw)
     end.
 
-update_exchange(#{exchange := X = #exchange{name = XName},
+update_exchange_in_khepri(#{exchange := X = #exchange{name = XName},
                   policy := NewPolicy,
                   op_policy := NewOpPolicy,
                   decorators := Decorators}) ->
-    NewExchange = rabbit_exchange:update_in_khepri(
+    NewExchange = rabbit_store:update_exchange_in_khepri(
                     XName,
                     fun(X0) ->
                             X0 #exchange{policy = NewPolicy,
@@ -611,7 +580,7 @@ get_updated_queue(Q0, Policies, OpPolicies) when ?is_amqqueue(Q0) ->
               decorators => Decorators}
     end.
 
-update_queue(#{queue := Q0, policy := NewPolicy, op_policy := NewOpPolicy, decorators := Decorators}) ->
+update_queue_in_khepri(#{queue := Q0, policy := NewPolicy, op_policy := NewOpPolicy, decorators := Decorators}) ->
     QName = amqqueue:get_name(Q0),
     F = fun (QFun0) ->
                 QFun1 = amqqueue:set_policy(QFun0, NewPolicy),
@@ -620,7 +589,7 @@ update_queue(#{queue := Q0, policy := NewPolicy, op_policy := NewOpPolicy, decor
                 QFun3 = amqqueue:set_policy_version(QFun2, NewPolicyVersion),
                 amqqueue:set_decorators(QFun3, Decorators)
         end,
-    NewQueue = rabbit_amqqueue:update_in_khepri(QName, F),
+    NewQueue = rabbit_store:update_queue_in_khepri(QName, F),
     case NewQueue of
         Q1 when ?is_amqqueue(Q1) ->
             {Q0, Q1};
