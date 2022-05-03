@@ -1875,60 +1875,17 @@ confirm_to_sender(Pid, QName, MsgSeqNos) ->
     rabbit_classic_queue:confirm_to_sender(Pid, QName, MsgSeqNos).
 
 update_state(State, Q) ->
-    rabbit_khepri:try_mnesia_or_khepri(
-      fun() -> update_state_in_mnesia(State, Q) end,
-      fun() -> update_state_in_khepri(State, Q) end).
-
-update_state_in_mnesia(State, Q0) ->
-    QName = amqqueue:get_name(Q0),
-    rabbit_misc:execute_mnesia_transaction(
-      fun() ->
-              [Q] = mnesia:read({rabbit_queue, QName}),
-              Q2 = amqqueue:set_state(Q, State),
-              %% amqqueue migration:
-              %% The amqqueue was read from this transaction, no need
-              %% to handle migration.
-              rabbit_amqqueue:store_queue(Q2)
-      end).
-
-update_state_in_khepri(State, Q0) ->
-    QName = amqqueue:get_name(Q0),
-    Decorators = rabbit_queue_decorator:active(Q0),
-    rabbit_khepri:transaction(
-      fun() ->
-              [Q] = rabbit_amqqueue:lookup_as_list_in_khepri(rabbit_queue, QName),
-              Q2 = amqqueue:set_state(Q, State),
-              %% amqqueue migration:
-              %% The amqqueue was read from this transaction, no need
-              %% to handle migration.
-              Q3 = amqqueue:set_decorators(Q2, Decorators),
-              rabbit_amqqueue:store_queue_in_khepri(Q3)
-      end, rw).
+    Decorators = rabbit_queue_decorator:active(Q),
+    rabbit_store:update_queue(amqqueue:get_name(Q),
+                              fun(Q0) ->
+                                      Q1 = amqqueue:set_state(Q0, State),
+                                      amqqueue:set_decorators(Q1, Decorators)
+                              end).
 
 upgrade(Q) ->
-    rabbit_khepri:try_mnesia_or_khepri(
-      fun() -> upgrade_in_mnesia(Q) end,
-      fun() -> upgrade_in_khepri(Q) end).
-
-upgrade_in_mnesia(Q) ->
-    rabbit_misc:execute_mnesia_transaction(
-      fun() ->
-              ?try_mnesia_tx_or_upgrade_amqqueue_and_retry(
-                 rabbit_amqqueue:store_queue(Q),
-                 begin
-                     Q1 = amqqueue:upgrade(Q),
-                     rabbit_amqqueue:store_queue(Q1)
-                 end)
-      end).
-
-upgrade_in_khepri(Q) ->
-    %% TODO prepare queues outside of the transaction
-    Decorators = rabbit_queue_decorator:active(Q),
-    Queue = amqqueue:set_decorators(Q),
-    ?try_mnesia_tx_or_upgrade_amqqueue_and_retry(
-       rabbit_amqqueue:optimised_store_queue_in_khepri(Queue),
+    ?try_tx_or_upgrade_amqqueue_and_retry(
+       rabbit_amqqueue:store_queue(Q),
        begin
-           Q2 = amqqueue:upgrade(Q),
-           Q3 = amqqueue:set_decorators(Q2, Decorators),
-           rabbit_amqqueue:optimised_store_queue_in_khepri(Q3)
+           Q1 = amqqueue:upgrade(Q),
+           rabbit_amqqueue:store_queue(Q1)
        end).

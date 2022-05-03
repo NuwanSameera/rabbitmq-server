@@ -142,7 +142,7 @@ migrate_queue_record_in_mnesia(QName, GM, Self) ->
 
 migrate_queue_record_in_khepri(QName, GM, Self) ->
     Fun = fun () ->
-                  [Q1] = rabbit_amqqueue:lookup_as_list_in_khepri(rabbit_queue, QName),
+                  [Q1] = rabbit_store:lookup_queue_in_khepri_tx(rabbit_queue, QName),
                   true = amqqueue:is_amqqueue(Q1),
                   GMPids0 = amqqueue:get_gm_pids(Q1),
                   GMPids1 = [{GM, Self} | GMPids0],
@@ -150,7 +150,7 @@ migrate_queue_record_in_khepri(QName, GM, Self) ->
                   Q3 = amqqueue:set_state(Q2, live),
                   %% Todo it's missing the decorators, but at the moment we don't support
                   %% HA in khepri
-                  ok = rabbit_amqqueue:store_queue_in_khepri(Q3)
+                  ok = rabbit_store:store_queue_in_khepri(Q3)
           end,
     ok = rabbit_khepri:transaction(Fun, rw).
 
