@@ -579,7 +579,8 @@ get_updated_exchange(X = #exchange{name = XName,
     case {match(XName, Policies), match(XName, OpPolicies)} of
         {OldPolicy, OldOpPolicy} -> no_change;
         {NewPolicy, NewOpPolicy} ->
-            Decorators = rabbit_exchange_decorator:active(X),
+            Decorators = rabbit_exchange_decorator:active(X#exchange{policy = NewPolicy,
+                                                                     operator_policy = NewOpPolicy}),
             #{exchange => X,
               policy => NewPolicy,
               op_policy => NewOpPolicy,
@@ -592,7 +593,8 @@ get_updated_queue(Q0, Policies, OpPolicies) when ?is_amqqueue(Q0) ->
     case {match(Q0, Policies), match(Q0, OpPolicies)} of
         {OldPolicy, OldOpPolicy} -> no_change;
         {NewPolicy, NewOpPolicy} ->
-            Decorators = rabbit_queue_decorator:active(Q0),
+            Q = amqqueue:set_operator_policy(amqqueue:set_policy(Q0, NewPolicy), NewOpPolicy),
+            Decorators = rabbit_queue_decorator:active(Q),
             #{queue => Q0,
               policy => NewPolicy,
               op_policy => NewOpPolicy,
