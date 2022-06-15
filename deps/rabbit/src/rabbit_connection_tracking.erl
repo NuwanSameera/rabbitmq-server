@@ -54,9 +54,26 @@
 -define(TRACKED_CONNECTION_PER_VHOST_TABLE_NAME_FOR, tracked_connection_per_vhost_on_node).
 -define(TRACKED_CONNECTION_PER_USER_TABLE_NAME_FOR, tracked_connection_table_per_user_on_node).
 
+-define(MDS_TABLES, [{?TRACKED_CONNECTION_TABLE_NAME_FOR,
+                      #{type => tracking,
+                        name => ?TRACKED_CONNECTION_TABLE_NAME_FOR,
+                        key => #tracked_connection.id}},
+                     {?TRACKED_CONNECTION_PER_VHOST_TABLE_NAME_FOR,
+                      #{type => tracking_counter,
+                        name => ?TRACKED_CONNECTION_PER_VHOST_TABLE_NAME_FOR,
+                        key => #tracked_connection_per_vhost.vhost,
+                        counter => #tracked_connection_per_vhost.connection_count}},
+                     {?TRACKED_CONNECTION_PER_USER_TABLE_NAME_FOR,
+                      #{type => tracking_counter,
+                        name => ?TRACKED_CONNECTION_PER_USER_TABLE_NAME_FOR,
+                        key => #tracked_connection_per_user.user,
+                        counter => #tracked_connection_per_user.connection_count}}]).
+
 -import(rabbit_misc, [pget/2]).
 
 -export([close_connections/3]).
+%% Auxiliary function for the metadata store migration
+-export([mds_tables/0]).
 
 %%
 %% API
@@ -364,6 +381,12 @@ list_of_user(Username) ->
           #tracked_connection{username = Username, _ = '_'})
     catch exit:{aborted, {no_exists, _}} -> []
     end.
+
+
+mds_tables() ->
+    lists:flatten(
+      [[{rabbit_store:tracked_table_name_for(Name, Node), rabbit_store, ExtraArgs#{node => Node}}
+        || {Name, ExtraArgs} <- ?MDS_TABLES] || Node <- rabbit_nodes:all_running()]).
 
 %% Internal, delete tracked entries
 
