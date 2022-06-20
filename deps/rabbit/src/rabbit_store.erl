@@ -1083,7 +1083,7 @@ clear_tracking_table(Name, Node) ->
       end,
       fun() ->
               Path = khepri_tracking_path(Name, Node),
-              {ok, _} = rabbit_khepri:delete(Path),
+              _ = rabbit_khepri:delete(Path),
               ok
       end).
 

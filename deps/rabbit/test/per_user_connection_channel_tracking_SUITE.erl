@@ -372,7 +372,7 @@ single_node_vhost_deletion(Config) ->
     [?assertEqual(false, is_process_alive(Ch)) || Ch <- Chans1],
 
     %% ensure vhost entry is cleared after 'tracking_execution_timeout'
-    ?assertEqual(false, exists_in_tracked_connection_per_vhost_table(Config, Vhost)),
+    ?awaitMatch(false, exists_in_tracked_connection_per_vhost_table(Config, Vhost), ?TIMEOUT),
 
     rabbit_ct_broker_helpers:add_vhost(Config, Vhost).
 
