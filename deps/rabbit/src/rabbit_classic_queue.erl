@@ -49,6 +49,7 @@
 
 -export([confirm_to_sender/3,
          send_rejection/3,
+         deliver_to_consumer/5,
          send_queue_event/3]).
 
 is_enabled() -> true.
@@ -532,6 +533,18 @@ send_rejection(Pid, QName, MsgSeqNo) ->
         false ->
             gen_server2:cast(Pid, {reject_publish, MsgSeqNo, self()})
     end.
+
+deliver_to_consumer(Pid, QName, CTag, AckRequired, Message) ->
+    case rabbit_feature_flags:is_enabled(classic_queue_type_fix) of
+        true ->
+            Deliver = {deliver, CTag, AckRequired, [Message]},
+            Evt = {queue_event, QName, Deliver},
+            gen_server2:cast(Pid, Evt);
+        false ->
+            Deliver = {deliver, CTag, AckRequired, Message},
+            gen_server2:cast(Pid, Deliver)
+    end.
+
 
 send_queue_event(Pid, QName, Evt) ->
     gen_server2:cast(Pid, {queue_event, QName, Evt}).
