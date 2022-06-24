@@ -273,8 +273,10 @@ deliver_to_consumer(FetchFun,
                             unsent_message_count = Count},
                     QName) ->
     {{Message, IsDelivered, AckTag}, R} = FetchFun(AckRequired),
-    rabbit_channel:deliver(ChPid, CTag, AckRequired,
-                           {QName, self(), AckTag, IsDelivered, Message}),
+    Deliver = {deliver, CTag, AckRequired,
+               [{QName, self(), AckTag, IsDelivered, Message}]},
+    Evt = {queue_event, QName, Deliver},
+    gen_server2:cast(ChPid, Evt),
     ChAckTags1 = case AckRequired of
                      true  -> ?QUEUE:in({AckTag, CTag}, ChAckTags);
                      false -> ChAckTags

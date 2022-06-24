@@ -238,6 +238,8 @@ handle_event({confirm, MsgSeqNos, Pid}, #?STATE{qref = QRef,
     %% been received (or DOWN has been received).
     %% Hence this part of the confirm logic is queue specific.
     {ok, State#?STATE{unconfirmed = Unconfirmed}, Actions};
+handle_event({deliver, _, _, _} = Delivery, #?STATE{} = State) ->
+    {ok, State, [Delivery]};
 handle_event({reject_publish, SeqNo, _QPid},
               #?STATE{qref = QRef,
                       unconfirmed = U0} = State) ->
