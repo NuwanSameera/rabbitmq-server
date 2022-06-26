@@ -440,7 +440,7 @@ exists_binding(#binding{source = SrcName,
                               lookup_resource_in_khepri_tx(DstName)} of
                             {[_Src], [_Dst]} ->
                                 exists_binding_in_khepri(Path, Binding);
-                            Errs -> not_found_or_absent_errs_in_khepri(
+                            Errs -> not_found_or_absent_errs_in_khepri_tx(
                                       not_found(Errs, SrcName, DstName))
                         end
                 end, ro)
@@ -838,7 +838,7 @@ store_queue_without_recover(DurableQ, Q) ->
                             {ok, #{Path := #{data := ExistingQ}}} ->
                                 {existing, ExistingQ};
                             _ ->
-                                case not_found_or_absent_queue_in_khepri(QueueName) of
+                                case not_found_or_absent_queue_in_khepri_tx(QueueName) of
                                     not_found ->
                                         case ?amqqueue_is_durable(DurableQ) of
                                             true ->
@@ -1713,6 +1713,10 @@ not_found_or_absent_errs_in_mnesia(Names) ->
     Errs = [not_found_or_absent_in_mnesia(Name) || Name <- Names],
     rabbit_misc:const({error, {resources_missing, Errs}}).
 
+not_found_or_absent_errs_in_khepri_tx(Names) ->
+    Errs = [not_found_or_absent_in_khepri_tx(Name) || Name <- Names],
+    {error, {resources_missing, Errs}}.
+
 not_found_or_absent_errs_in_khepri(Names) ->
     Errs = [not_found_or_absent_in_khepri(Name) || Name <- Names],
     {error, {resources_missing, Errs}}.
@@ -1725,9 +1729,9 @@ absent_errs_only_in_mnesia(Names) ->
                           _  -> {error, {resources_missing, Errs}}
                       end).
 
-absent_errs_only_in_khepri(Names) ->
+absent_errs_only_in_khepri_tx(Names) ->
     Errs = [E || Name <- Names,
-                 {absent, _Q, _Reason} = E <- [not_found_or_absent_in_khepri(Name)]],
+                 {absent, _Q, _Reason} = E <- [not_found_or_absent_in_khepri_tx(Name)]],
     case Errs of
         [] -> ok;
         _  -> {error, {resources_missing, Errs}}
@@ -1749,6 +1753,14 @@ not_found_or_absent_queue_in_mnesia(Name) ->
         [Q] -> {absent, Q, nodedown} %% Q exists on stopped node
     end.
 
+not_found_or_absent_in_khepri_tx(#resource{kind = exchange} = Name) ->
+    {not_found, Name};
+not_found_or_absent_in_khepri_tx(#resource{kind = queue}    = Name) ->
+    case not_found_or_absent_queue_in_khepri_tx(Name) of
+        not_found                 -> {not_found, Name};
+        {absent, _Q, _Reason} = R -> R
+    end.
+
 not_found_or_absent_in_khepri(#resource{kind = exchange} = Name) ->
     {not_found, Name};
 not_found_or_absent_in_khepri(#resource{kind = queue}    = Name) ->
@@ -1757,7 +1769,7 @@ not_found_or_absent_in_khepri(#resource{kind = queue}    = Name) ->
         {absent, _Q, _Reason} = R -> R
     end.
 
-not_found_or_absent_queue_in_khepri(Name) ->
+not_found_or_absent_queue_in_khepri_tx(Name) ->
     %% NB: we assume that the caller has already performed a lookup on
     %% rabbit_queue and not found anything
     Path = khepri_durable_queue_path(Name),
@@ -1766,17 +1778,20 @@ not_found_or_absent_queue_in_khepri(Name) ->
         _  -> not_found
     end.
 
+not_found_or_absent_queue_in_khepri(Name) ->
+    %% NB: we assume that the caller has already performed a lookup on
+    %% rabbit_queue and not found anything
+    %% This might hit khepri cache, vs a full transaction
+    Path = khepri_durable_queue_path(Name),
+    case rabbit_khepri:get_data(Path) of
+        {ok, Q} -> {absent, Q, nodedown}; %% Q exists on stopped node
+        _  -> not_found
+    end.
+
 not_found_or_absent_queue_dirty(Name) ->
     rabbit_khepri:try_mnesia_or_khepri(
       fun() -> not_found_or_absent_queue_dirty_in_mnesia(Name) end,
-      fun() ->
-              %% This might hit khepri cache, vs a full transaction
-              Path = khepri_durable_queue_path(Name),
-              case rabbit_khepri:get_data(Path) of
-                  {ok, Q} -> {absent, Q, nodedown}; %% Q exists on stopped node
-                  _  -> not_found
-              end
-      end).
+      fun() -> not_found_or_absent_queue_in_khepri(Name) end).
 
 not_found_or_absent_queue_dirty_in_mnesia(Name) ->
     %% We should read from both tables inside a tx, to get a
@@ -2005,7 +2020,7 @@ remove_binding_in_khepri(#binding{source = SrcName,
                                    end
                            end;
                        Errs ->
-                           absent_errs_only_in_khepri(not_found(Errs, SrcName, DstName))
+                           absent_errs_only_in_khepri_tx(not_found(Errs, SrcName, DstName))
                    end
            end) of
         ok ->
