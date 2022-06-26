@@ -56,10 +56,12 @@ all_tests() ->
      info_all,
      list_with_multiple_vhosts,
      list_with_multiple_arguments,
+     bind_to_unknown_queue,
      %% Exchange bindings
      bind_and_unbind_exchange,
      bind_and_delete_exchange_source,
-     bind_and_delete_exchange_destination
+     bind_and_delete_exchange_destination,
+     bind_to_unknown_exchange
     ].
 
 %% -------------------------------------------------------------------
@@ -687,6 +689,25 @@ from_mnesia_to_khepri(Config) ->
             Skip
     end.
 
+bind_to_unknown_queue(Config) ->
+    Server = rabbit_ct_broker_helpers:get_node_config(Config, 0, nodename),
+
+    Ch = rabbit_ct_client_helpers:open_channel(Config, Server),
+    Q = ?config(queue_name, Config),
+
+    DefaultExchange = rabbit_misc:r(<<"/">>, exchange, <<>>),
+    QResource = rabbit_misc:r(<<"/">>, queue, Q),
+    DefaultBinding = binding_record(DefaultExchange, QResource, Q, []),
+
+    %% Let's bind to exchange
+    ?assertExit({{shutdown, {server_initiated_close,404, _}}, _},
+                amqp_channel:call(Ch, #'queue.bind'{exchange = <<"amq.direct">>,
+                                                    queue = Q,
+                                                    routing_key = Q})),
+    ?assertEqual([],
+                 rabbit_ct_broker_helpers:rpc(Config, 0, rabbit_binding, list, [<<"/">>])),
+    ok.
+
 bind_and_unbind_exchange(Config) ->
     Server = rabbit_ct_broker_helpers:get_node_config(Config, 0, nodename),
     
@@ -715,6 +736,24 @@ bind_and_unbind_exchange(Config) ->
                                                                    source = <<"amq.direct">>,
                                                                    routing_key = <<"key">>}),
     
+    ?assertEqual([],
+                 rabbit_ct_broker_helpers:rpc(Config, 0, rabbit_binding, list, [<<"/">>])),
+    ok.
+
+bind_to_unknown_exchange(Config) ->
+    Server = rabbit_ct_broker_helpers:get_node_config(Config, 0, nodename),
+
+    Ch = rabbit_ct_client_helpers:open_channel(Config, Server),
+    X = ?config(exchange_name, Config),
+
+    ?assertEqual([],
+                 rabbit_ct_broker_helpers:rpc(Config, 0, rabbit_binding, list, [<<"/">>])),
+
+    %% Let's bind to exchange
+    ?assertExit({{shutdown, {server_initiated_close,404, _}}, _},
+                amqp_channel:call(Ch, #'exchange.bind'{destination = X,
+                                                       source = <<"amq.direct">>,
+                                                       routing_key = <<"key">>})),
     ?assertEqual([],
                  rabbit_ct_broker_helpers:rpc(Config, 0, rabbit_binding, list, [<<"/">>])),
     ok.
