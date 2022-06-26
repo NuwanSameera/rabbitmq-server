@@ -291,10 +291,10 @@ ensure_ra_system_started() ->
     ok = rabbit_ra_systems:ensure_ra_system_started(?RA_SYSTEM).
 
 members() ->
-    khepri:members(?RA_CLUSTER_NAME).
+    khepri_cluster:members(?RA_CLUSTER_NAME).
 
 locally_known_members() ->
-    khepri:locally_known_members(?RA_CLUSTER_NAME).
+    khepri_cluster:locally_known_members(?RA_CLUSTER_NAME).
 
 nodes() ->
     khepri_cluster:nodes(?RA_CLUSTER_NAME).

@@ -1774,6 +1774,7 @@ delete_queues_on_node_down(Node) ->
     lists:unzip(lists:flatten(
                   [case rabbit_store:delete_transient_queues(Queues) of
                        {error, noproc} -> [];
+                       {error, {timeout, _}} -> [];
                        Value -> Value
                    end || Queues <- Partitions]
                  )).

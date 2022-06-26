@@ -69,13 +69,13 @@
                     {enables,     external_infrastructure}]}).
 
 -rabbit_boot_step({database,
-                   [{mfa,         {rabbit_mnesia, init, []}},
+                   [{mfa,         {rabbit_store, init, []}},
                     {requires,    file_handle_cache},
                     {enables,     external_infrastructure}]}).
 
 -rabbit_boot_step({database_sync,
                    [{description, "database sync"},
-                    {mfa,         {rabbit_sup, start_child, [mnesia_sync]}},
+                    {mfa,         {rabbit_store, sync, []}},
                     {requires,    database},
                     {enables,     external_infrastructure}]}).
 
@@ -218,11 +218,13 @@
 -rabbit_boot_step({connection_tracking,
                    [{description, "connection tracking infrastructure"},
                     {mfa,         {rabbit_connection_tracking, boot, []}},
+                    {requires,    database_sync},
                     {enables,     routing_ready}]}).
 
 -rabbit_boot_step({channel_tracking,
                    [{description, "channel tracking infrastructure"},
                     {mfa,         {rabbit_channel_tracking, boot, []}},
+                    {requires,    database_sync},
                     {enables,     routing_ready}]}).
 
 -rabbit_boot_step({background_gc,
