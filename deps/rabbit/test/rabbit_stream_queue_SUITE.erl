@@ -830,7 +830,8 @@ restart_coordinator_without_queues(Config) ->
     ?assertMatch(#'queue.delete_ok'{}, amqp_channel:call(Ch, #'queue.delete'{queue = Q})),
 
     [rabbit_ct_broker_helpers:stop_node(Config, S) || S <- Servers0],
-    [rabbit_ct_broker_helpers:start_node(Config, S) || S <- lists:reverse(Servers0)],
+    [spawn(fun() -> rabbit_ct_broker_helpers:start_node(Config, S) end)|| S <- lists:reverse(tl(Servers0))],
+    rabbit_ct_broker_helpers:start_node(Config, hd(Servers0)),
 
     Ch1 = rabbit_ct_client_helpers:open_channel(Config, Server),
     ?assertEqual({'queue.declare_ok', Q, 0, 0},
@@ -1735,7 +1736,7 @@ leader_failover_dedupe(Config) ->
                  declare(Ch1, Q, [{<<"x-queue-type">>, longstr, <<"stream">>}])),
 
     check_leader_and_replicas(Config, Nodes),
-
+    timer:sleep(5000),
     Ch2 = rabbit_ct_client_helpers:open_channel(Config, PubNode),
     #'confirm.select_ok'{} = amqp_channel:call(Ch2, #'confirm.select'{}),
 

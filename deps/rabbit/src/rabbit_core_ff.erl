@@ -559,7 +559,7 @@ migrate_tables_to_khepri_run(FeatureName, TablesAndOwners) ->
     %% Unsubscribe to Mnesia events. All Mnesia tables are synchronized and
     %% read-only at this point.
     ?LOG_DEBUG(
-       "Feature flag `~s`:   subscribe to Mnesia writes",
+       "Feature flag `~s`:   unsubscribe to Mnesia writes",
        [FeatureName]),
     ok = unsubscribe_to_mnesia_changes(FeatureName, Tables).
 
@@ -585,7 +585,7 @@ subscribe_to_mnesia_changes(_, []) ->
 
 unsubscribe_to_mnesia_changes(FeatureName, [Table | Rest]) ->
     ?LOG_DEBUG(
-       "Feature flag `~s`:     subscribe to writes to ~s",
+       "Feature flag `~s`:     unsubscribe to writes to ~s",
        [FeatureName, Table]),
     case mnesia:unsubscribe({table, Table, detailed}) of
         {ok, _} -> unsubscribe_to_mnesia_changes(FeatureName, Rest);

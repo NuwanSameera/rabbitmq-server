@@ -10,6 +10,7 @@
 -include_lib("common_test/include/ct.hrl").
 -include_lib("eunit/include/eunit.hrl").
 -include_lib("amqp_client/include/amqp_client.hrl").
+-include_lib("rabbitmq_ct_helpers/include/rabbit_assert.hrl").
 
 -compile([nowarn_export_all, export_all]).
 -compile(export_all).
@@ -815,6 +816,9 @@ transient_queue_on_node_down(Config) ->
     
     rabbit_ct_broker_helpers:stop_node(Config, Server),
 
+    %% This doesn't work because we only have one route path in Khepri. If we remove it,
+    %% we lose the info. If don't, it stays listed. Maybe we need a flag or else??
+    %% Used to mark when transient are gone, on recovery flag them as up. Weird at least?
     ?assertEqual([],
                  rabbit_ct_broker_helpers:rpc(Config, 1, rabbit_binding, list, [<<"/">>])),
     ?assertEqual([],
@@ -822,9 +826,11 @@ transient_queue_on_node_down(Config) ->
 
     rabbit_ct_broker_helpers:start_node(Config, Server),
 
-    ?assertEqual(lists:sort([DefaultBinding, DirectBinding]),
-                 lists:sort(
-                   rabbit_ct_broker_helpers:rpc(Config, 1, rabbit_binding, list, [<<"/">>]))),
+    Bindings1 = lists:sort([DefaultBinding, DirectBinding]),
+    ?awaitMatch(Bindings1,
+                lists:sort(
+                  rabbit_ct_broker_helpers:rpc(Config, 1, rabbit_binding, list, [<<"/">>])),
+                30000),
     ok.
 
 %% Internal
