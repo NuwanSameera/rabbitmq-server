@@ -32,7 +32,7 @@ match_bindings(SrcName, Match) ->
     match_result().
 
 match_routing_key(SrcName, RoutingKeys) ->
-    rabbit_store:match_routing_key(SrcName, RoutingKeys).
+    rabbit_store:match_routing_key(SrcName, RoutingKeys, false).
 
 %%--------------------------------------------------------------------
 

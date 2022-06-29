@@ -46,7 +46,7 @@
          store_queue_dirty/1]).
 
 %% Routing. These functions are in the hot code path
--export([match_bindings/2, match_routing_key/2]).
+-export([match_bindings/2, match_routing_key/3]).
 
 -export([add_listener/1, list_listeners/1, list_listeners/2,
          delete_listener/1, delete_listeners/1]).
@@ -912,43 +912,77 @@ match_bindings(SrcName, Match) ->
               [Dest || Binding = #binding{destination = Dest} <- Bindings, Match(Binding)]
       end).
 
-match_routing_key(SrcName, [RoutingKey]) ->
+match_routing_key(SrcName, RoutingKeys, UseIndex) ->
     rabbit_khepri:try_mnesia_or_khepri(
       fun() ->
-              MatchHead = #route{binding = #binding{source      = SrcName,
-                                                    destination = '$1',
-                                                    key         = RoutingKey,
-                                                    _           = '_'}},
-              ets:select(rabbit_route, [{MatchHead, [], ['$1']}])
-      end,
-      fun() ->
-              match_source_and_key_in_khepri(SrcName, [RoutingKey])
-      end);
-match_routing_key(SrcName, [_|_] = RoutingKeys) ->
-    rabbit_khepri:try_mnesia_or_khepri(
-      fun() ->
-              %% Normally we'd call mnesia:dirty_select/2 here, but that is quite
-              %% expensive for the same reasons as above, and, additionally, due to
-              %% mnesia 'fixing' the table with ets:safe_fixtable/2, which is wholly
-              %% unnecessary. According to the ets docs (and the code in erl_db.c),
-              %% 'select' is safe anyway ("Functions that internally traverse over a
-              %% table, like select and match, will give the same guarantee as
-              %% safe_fixtable.") and, furthermore, even the lower level iterators
-              %% ('first' and 'next') are safe on ordered_set tables ("Note that for
-              %% tables of the ordered_set type, safe_fixtable/2 is not necessary as
-              %% calls to first/1 and next/2 will always succeed."), which
-              %% rabbit_route is.
-              MatchHead = #route{binding = #binding{source      = SrcName,
-                                                    destination = '$1',
-                                                    key         = '$2',
-                                                    _           = '_'}},
-              Conditions = [list_to_tuple(['orelse' | [{'=:=', '$2', RKey} ||
-                                                          RKey <- RoutingKeys]])],
-              ets:select(rabbit_route, [{MatchHead, Conditions, ['$1']}])
+              case UseIndex of
+                  true ->
+                      route_in_mnesia_v2(SrcName, RoutingKeys);
+                  _ ->
+                      route_in_mnesia_v1(SrcName, RoutingKeys)
+              end
       end,
       fun() ->
               match_source_and_key_in_khepri(SrcName, RoutingKeys)
       end).
+
+route_in_mnesia_v1(SrcName, [RoutingKey]) ->
+    MatchHead = #route{binding = #binding{source      = SrcName,
+                                          destination = '$1',
+                                          key         = RoutingKey,
+                                          _           = '_'}},
+    ets:select(rabbit_route, [{MatchHead, [], ['$1']}]);
+route_in_mnesia_v1(SrcName, [_|_] = RoutingKeys) ->
+    %% Normally we'd call mnesia:dirty_select/2 here, but that is quite
+    %% expensive for the same reasons as above, and, additionally, due to
+    %% mnesia 'fixing' the table with ets:safe_fixtable/2, which is wholly
+    %% unnecessary. According to the ets docs (and the code in erl_db.c),
+    %% 'select' is safe anyway ("Functions that internally traverse over a
+    %% table, like select and match, will give the same guarantee as
+    %% safe_fixtable.") and, furthermore, even the lower level iterators
+    %% ('first' and 'next') are safe on ordered_set tables ("Note that for
+    %% tables of the ordered_set type, safe_fixtable/2 is not necessary as
+    %% calls to first/1 and next/2 will always succeed."), which
+    %% rabbit_route is.
+    MatchHead = #route{binding = #binding{source      = SrcName,
+                                          destination = '$1',
+                                          key         = '$2',
+                                          _           = '_'}},
+    Conditions = [list_to_tuple(['orelse' | [{'=:=', '$2', RKey} ||
+                                                RKey <- RoutingKeys]])],
+    ets:select(rabbit_route, [{MatchHead, Conditions, ['$1']}]).
+
+%% rabbit_router:match_routing_key/2 uses ets:select/2 to get destinations.
+%% ets:select/2 is expensive because it needs to compile the match spec every
+%% time and lookup does not happen by a hash key.
+%%
+%% In contrast, route_v2/2 increases end-to-end message sending throughput
+%% (i.e. from RabbitMQ client to the queue process) by up to 35% by using ets:lookup_element/3.
+%% Only the direct exchange type uses the rabbit_index_route table to store its
+%% bindings by table key tuple {SourceExchange, RoutingKey}.
+-spec route_in_mnesia_v2(rabbit_types:binding_source(), [rabbit_router:routing_key(), ...]) ->
+    rabbit_router:match_result().
+route_in_mnesia_v2(SrcName, [RoutingKey]) ->
+    %% optimization
+    destinations(SrcName, RoutingKey);
+route_in_mnesia_v2(SrcName, [_|_] = RoutingKeys) ->
+    lists:flatmap(fun(Key) ->
+                          destinations(SrcName, Key)
+                  end, RoutingKeys).
+
+destinations(SrcName, RoutingKey) ->
+    %% Prefer try-catch block over checking Key existence with ets:member/2.
+    %% The latter reduces throughput by a few thousand messages per second because
+    %% of function db_member_hash in file erl_db_hash.c.
+    %% We optimise for the happy path, that is the binding / table key is present.
+    try
+        ets:lookup_element(rabbit_index_route,
+                           {SrcName, RoutingKey},
+                           #index_route.destination)
+    catch
+        error:badarg ->
+            []
+    end.
 
 %% Listeners
 add_listener(Listener) ->
