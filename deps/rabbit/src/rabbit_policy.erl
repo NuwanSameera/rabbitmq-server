@@ -185,7 +185,7 @@ get(Name, EntityName = #resource{virtual_host = VHost}) ->
 
 %% It's exported, so give it a default until all khepri transformation is sorted
 match(NameOrQueue, Policies) ->
-    match(NameOrQueue, Policies, is_policy_applicable_in_mnesia).
+    match(NameOrQueue, Policies, is_policy_applicable).
 
 match(NameOrQueue, Policies, Function) ->
     case match_all(NameOrQueue, Policies, Function) of
@@ -195,7 +195,7 @@ match(NameOrQueue, Policies, Function) ->
 
 %% It's exported, so give it a default until all khepri transformation is sorted
 match_all(NameOrQueue, Policies) ->
-    match_all(NameOrQueue, Policies, is_policy_applicable_in_mnesia).
+    match_all(NameOrQueue, Policies, is_policy_applicable).
 
 match_all(NameOrQueue, Policies, Function) ->
    lists:sort(fun priority_comparator/2, [P || P <- Policies, matches(NameOrQueue, P, Function)]).
