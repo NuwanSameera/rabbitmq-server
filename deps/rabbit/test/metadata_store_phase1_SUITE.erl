@@ -2687,7 +2687,10 @@ delete_vhost(mnesia, VHostName) ->
       end);
 delete_vhost(khepri, VHostName) ->
     rabbit_vhost:clear_permissions_in_khepri(VHostName, undefined),
-    rabbit_vhost:internal_delete_in_khepri(VHostName).
+    WithKhepri = rabbit_vhost:with_in_khepri(
+                   VHostName,
+                   fun() -> rabbit_vhost:internal_delete_in_khepri(VHostName) end),
+    WithKhepri().
 
 add_user(mnesia, Username, User) ->
     rabbit_auth_backend_internal:add_user_sans_validation_in_mnesia(

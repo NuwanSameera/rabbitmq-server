@@ -52,6 +52,8 @@
          list_global/0, list_global_formatted/0, list_global_formatted/2,
          lookup_global/1, global_info_keys/0, clear_global/2]).
 
+-export([list_in_khepri_tx/2]).
+
 -export([clear_data_in_khepri/2,
          mnesia_write_to_khepri/3,
          mnesia_delete_to_khepri/3]).
@@ -203,7 +205,7 @@ khepri_update(Key, Term) ->
 
 khepri_update(VHost, Comp, Name, Term) ->
     rabbit_khepri:transaction(
-      rabbit_vhost:with_in_khepri(
+      rabbit_vhost:with_in_khepri_tx(
         VHost, khepri_update_fun({VHost, Comp, Name}, Term))).
 
 khepri_update_fun(Key, Term) ->
@@ -322,7 +324,7 @@ khepri_clear(VHost, Component, Name) ->
                 ok
         end,
     ok = rabbit_khepri:transaction(
-           rabbit_vhost:with_in_khepri(VHost, F)).
+           rabbit_vhost:with_in_khepri_tx(VHost, F)).
 
 event_notify(_Event, _VHost, <<"policy">>, _Props) ->
     ok;
@@ -389,22 +391,30 @@ list_in_khepri(VHost, Component) ->
     Path = khepri_vhost_rp_path(VHost, Component, ?STAR),
     rabbit_khepri:transaction(
       fun() ->
-              case VHost of
-                  ?STAR -> ok;
-                  %% Inside of a transaction, using `rabbit_vhost:exists` will cause
-                  %% a deadlock and timeout on the transaction, as it uses `rabbit_khepri:exists`.
-                  %% The `with` function uses the `khepri_tx` API instead
-                  _     -> rabbit_vhost:with_in_khepri(VHost, fun() -> ok end)
-              end,
-              case khepri_tx:get(Path) of
-                  {ok, Result} ->
-              [p(P) || #{data := #runtime_parameters{key = {_VHost, Comp, _Name}}} = #{data := P} <-
-                           maps:values(Result),
-                       Comp =/= <<"policy">> orelse Component =:= <<"policy">>];
-                  _ ->
-                      []
-              end
+              list_in_khepri_tx(VHost, Component)
       end, ro).
+
+list_in_khepri_tx('_', Component) ->
+    list_in_khepri_tx(?STAR, Component);
+list_in_khepri_tx(VHost, '_') ->
+    list_in_khepri_tx(VHost, ?STAR);
+list_in_khepri_tx(VHost, Component) ->
+    Path = khepri_vhost_rp_path(VHost, Component, ?STAR),
+    case VHost of
+        ?STAR -> ok;
+        %% Inside of a transaction, using `rabbit_vhost:exists` will cause
+        %% a deadlock and timeout on the transaction, as it uses `rabbit_khepri:exists`.
+        %% The `with` function uses the `khepri_tx` API instead
+        _     -> rabbit_vhost:with_in_khepri_tx(VHost, fun() -> ok end)
+    end,
+    case khepri_tx:get(Path) of
+        {ok, Result} ->
+            [p(P) || #{data := #runtime_parameters{key = {_VHost, Comp, _Name}}} = #{data := P} <-
+                         maps:values(Result),
+                     Comp =/= <<"policy">> orelse Component =:= <<"policy">>];
+        _ ->
+            []
+    end.
 
 list_global() ->
     %% list only atom keys

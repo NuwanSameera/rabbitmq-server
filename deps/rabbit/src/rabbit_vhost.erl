@@ -15,7 +15,7 @@
 
 -export([recover/0, recover/1, read_config/1]).
 -export([add/2, add/4, delete/2, exists/1,
-         with/2, with_in_mnesia/2, with_in_khepri/2,
+         with_in_mnesia/2, with_in_khepri_tx/2,
          with_user_and_vhost/3, with_user_and_vhost_in_mnesia/3, with_user_and_vhost_in_khepri/3,
          assert/1, update/2,
          set_limits/2, vhost_cluster_state/1, is_running_on_all_nodes/1, await_running_on_all_nodes/2,
@@ -34,7 +34,8 @@
          khepri_vhost_path/1]).
 
 -ifdef(TEST).
--export([do_add_to_mnesia/3,
+-export([with_in_khepri/2,
+         do_add_to_mnesia/3,
          do_add_to_khepri/3,
          lookup_in_mnesia/1,
          lookup_in_khepri/1,
@@ -53,7 +54,8 @@
          clear_permissions_in_mnesia/2,
          clear_permissions_in_khepri/2,
          internal_delete_in_mnesia/1,
-         internal_delete_in_khepri/1]).
+         internal_delete_in_khepri/1,
+         internal_delete_in_khepri/2]).
 -endif.
 
 %%
@@ -324,17 +326,6 @@ delete(VHost, ActingUser) ->
     %% eventually the termination of that process. Exchange deletion causes
     %% notifications which must be sent outside the TX
     rabbit_log:info("Deleting vhost '~s'", [VHost]),
-    %% Clear the permissions first to prohibit new incoming connections when deleting a vhost
-    rabbit_khepri:try_mnesia_or_khepri(
-      fun() ->
-              rabbit_misc:execute_mnesia_transaction(
-                with_in_mnesia(
-                  VHost,
-                  fun() -> clear_permissions_in_mnesia(VHost, ActingUser) end))
-      end,
-      fun() ->
-              ok = clear_permissions_in_khepri(VHost, ActingUser)
-      end),
     QDelFun = fun (Q) -> rabbit_amqqueue:delete(Q, false, false, ActingUser) end,
     [begin
          Name = amqqueue:get_name(Q),
@@ -342,19 +333,14 @@ delete(VHost, ActingUser) ->
      end || Q <- rabbit_amqqueue:list(VHost)],
     [assert_benign(rabbit_exchange:delete(Name, false, ActingUser), ActingUser) ||
         #exchange{name = Name} <- rabbit_exchange:list(VHost)],
-    With = with(VHost, fun () -> internal_delete(VHost, ActingUser) end),
+    WithMnesia = with_in_mnesia(VHost, fun () -> internal_delete_in_mnesia(VHost, ActingUser) end),
+    WithKhepri = with_in_khepri(VHost, fun () -> internal_delete_in_khepri(VHost, ActingUser) end),
     Funs = rabbit_khepri:try_mnesia_or_khepri(
-             fun() -> rabbit_misc:execute_mnesia_transaction(With) end,
-             %% FIXME: Do we need the atomicity? Currently we can't use a
-             %% transaction because of the many side effects here and there in
-             %% other modules.
-             fun() -> internal_delete(VHost, ActingUser) end),
+             fun() -> rabbit_misc:execute_mnesia_transaction(WithMnesia) end,
+             fun() -> WithKhepri() end),
     ok = rabbit_event:notify(vhost_deleted, [{name, VHost},
                                              {user_who_performed_action, ActingUser}]),
-    [case Fun() of
-         ok                                  -> ok;
-         {error, {no_such_vhost, VHost}} -> ok
-     end || Fun <- Funs],
+    [Fun() || Fun <- Funs, is_function(Fun)],
     %% After vhost was deleted from mnesia DB, we try to stop vhost supervisors
     %% on all the nodes.
     rabbit_vhost_sup_sup:delete_on_all_nodes(VHost),
@@ -476,7 +462,7 @@ assert_benign({error, {absent, Q, _}}, ActingUser) ->
     QName = amqqueue:get_name(Q),
     rabbit_amqqueue:internal_delete(QName, ActingUser).
 
-internal_delete(VHost, ActingUser) ->
+internal_delete_in_mnesia(VHost, ActingUser) ->
     Fs1 = [rabbit_runtime_parameters:clear(VHost,
                                            proplists:get_value(component, Info),
                                            proplists:get_value(name, Info),
@@ -484,26 +470,29 @@ internal_delete(VHost, ActingUser) ->
      || Info <- rabbit_runtime_parameters:list(VHost)],
     Fs2 = [rabbit_policy:delete(VHost, proplists:get_value(name, Info), ActingUser)
            || Info <- rabbit_policy:list(VHost)],
-    _ = rabbit_khepri:try_mnesia_or_khepri(
-          fun() -> internal_delete_in_mnesia(VHost) end,
-          fun() -> internal_delete_in_khepri(VHost) end),
+    _ = internal_delete_in_mnesia(VHost),
     Fs1 ++ Fs2.
 
 internal_delete_in_mnesia(VHost) ->
     ok = mnesia:delete({rabbit_vhost, VHost}),
     ok.
 
+internal_delete_in_khepri(VHost, ActingUser) ->
+    %% FIXME: Use keep_until conditions to maintain atomicity in Khepri.
+    Fs1 = [rabbit_runtime_parameters:clear(VHost,
+                                           proplists:get_value(component, Info),
+                                           proplists:get_value(name, Info),
+                                           ActingUser)
+     || Info <- rabbit_runtime_parameters:list(VHost)],
+    Fs2 = [rabbit_policy:delete(VHost, proplists:get_value(name, Info), ActingUser)
+           || Info <- rabbit_policy:list(VHost)],
+    _ = internal_delete_in_khepri(VHost),
+    Fs1 ++ Fs2.
+
 internal_delete_in_khepri(VHost) ->
     Path = khepri_vhost_path(VHost),
-    {ok, Result} = rabbit_khepri:delete(Path),
-    %% We reproduce the behavior of `with(...)' here without using it directly
-    %% (because it expects to run inside a transaction).
-    %%
-    %% So if the vhost didn't exist before deletion, we throw an exception.
-    case Result =:= #{} of
-        false -> ok;
-        true  -> throw({error, {no_such_vhost, VHost}})
-    end.
+    {ok, _} = rabbit_khepri:delete(Path),
+    ok.
 
 -spec exists(vhost:name()) -> boolean().
 
@@ -590,14 +579,6 @@ lookup_in_khepri(VHostName) ->
         _            -> {error, {no_such_vhost, VHostName}}
     end.
 
--spec with(vhost:name(), rabbit_misc:thunk(A)) -> A.
-with(VHostName, Thunk) ->
-    fun() ->
-            rabbit_khepri:try_mnesia_or_khepri(
-              with_in_mnesia(VHostName, Thunk),
-              with_in_khepri(VHostName, Thunk))
-    end.
-
 with_in_mnesia(VHostName, Thunk) ->
     fun() ->
             case mnesia:read({rabbit_vhost, VHostName}) of
@@ -606,12 +587,21 @@ with_in_mnesia(VHostName, Thunk) ->
             end
     end.
 
-with_in_khepri(VHostName, Thunk) ->
+with_in_khepri_tx(VHostName, Thunk) ->
     fun() ->
             Path = khepri_vhost_path(VHostName),
             case khepri_tx:exists(Path) of
                 true  -> Thunk();
                 false -> khepri_tx:abort({no_such_vhost, VHostName})
+            end
+    end.
+
+with_in_khepri(VHostName, Thunk) ->
+    fun() ->
+            Path = khepri_vhost_path(VHostName),
+            case rabbit_khepri:exists(Path) of
+                true  -> Thunk();
+                false -> throw({error, {no_such_vhost, VHostName}})
             end
     end.
 
@@ -631,7 +621,7 @@ with_user_and_vhost_in_mnesia(Username, VHostName, Thunk) ->
 
 with_user_and_vhost_in_khepri(Username, VHostName, Thunk) ->
     rabbit_auth_backend_internal:with_user_in_khepri(
-      Username, with_in_khepri(VHostName, Thunk)).
+      Username, with_in_khepri_tx(VHostName, Thunk)).
 
 %% Like with/2 but outside an Mnesia tx
 
