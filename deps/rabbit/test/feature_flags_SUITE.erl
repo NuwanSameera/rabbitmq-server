@@ -27,6 +27,7 @@
          enable_feature_flag_when_ff_file_is_unwritable/1,
          enable_feature_flag_with_a_network_partition/1,
          mark_feature_flag_as_enabled_with_a_network_partition/1,
+         mandatory_feature_flag_enabled_by_default/1,
 
          clustering_ok_with_ff_disabled_everywhere/1,
          clustering_ok_with_ff_enabled_on_some_nodes/1,
@@ -35,6 +36,7 @@
          clustering_denied_with_new_ff_enabled/1,
          clustering_ok_with_new_ff_disabled_from_plugin_on_some_nodes/1,
          clustering_ok_with_new_ff_enabled_from_plugin_on_some_nodes/1,
+         clustering_ok_with_supported_mandatory_ff/1,
          activating_plugin_with_new_ff_disabled/1,
          activating_plugin_with_new_ff_enabled/1
         ]).
@@ -55,14 +57,16 @@ groups() ->
      {enabling_on_single_node, [],
       [
        enable_feature_flag_in_a_healthy_situation,
-       enable_unsupported_feature_flag_in_a_healthy_situation
+       enable_unsupported_feature_flag_in_a_healthy_situation,
+       mandatory_feature_flag_enabled_by_default
       ]},
      {enabling_in_cluster, [],
       [
        enable_feature_flag_in_a_healthy_situation,
        enable_unsupported_feature_flag_in_a_healthy_situation,
        enable_feature_flag_with_a_network_partition,
-       mark_feature_flag_as_enabled_with_a_network_partition
+       mark_feature_flag_as_enabled_with_a_network_partition,
+       mandatory_feature_flag_enabled_by_default
       ]},
      {clustering, [],
       [
@@ -72,7 +76,8 @@ groups() ->
        clustering_ok_with_new_ff_disabled,
        clustering_denied_with_new_ff_enabled,
        clustering_ok_with_new_ff_disabled_from_plugin_on_some_nodes,
-       clustering_ok_with_new_ff_enabled_from_plugin_on_some_nodes
+       clustering_ok_with_new_ff_enabled_from_plugin_on_some_nodes,
+       clustering_ok_with_supported_mandatory_ff
       ]},
      {activating_plugin, [],
       [
@@ -988,6 +993,64 @@ clustering_ok_with_new_ff_enabled_from_plugin_on_some_nodes(Config) ->
         false ->
             ok
     end,
+    ok.
+
+mandatory_feature_flag_enabled_by_default(Config) ->
+    StableFName = ff_from_testsuite,
+    MandatoryFName = quorum_queue,
+    ClusterSize = ?config(rmq_nodes_count, Config),
+    True = lists:duplicate(ClusterSize, true),
+    False = lists:duplicate(ClusterSize, false),
+
+    %% Restart the first node to make sure it evaluates again the list of
+    %% mandatory flags. Indeed, the testsuite injects its mandatory feature
+    %% flag after the nodes booted and we don't want to verify a
+    %% testsuite-specific handling.
+    %[Node | _] = rabbit_ct_broker_helpers:get_node_configs(Config, nodename),
+    %?assertEqual(ok, rabbit_ct_broker_helpers:stop_node(Config, Node)),
+    %?assertEqual(ok, rabbit_ct_broker_helpers:start_node(Config, Node)),
+
+    %% The stable feature flag is supported but disabled.
+    ?assertEqual(
+       True,
+       is_feature_flag_supported(Config, StableFName)),
+    ?assertEqual(
+       False,
+       is_feature_flag_enabled(Config, StableFName)),
+
+    %% The mandatory feature flag is supported and enabled.
+    ?assertEqual(
+       True,
+       is_feature_flag_supported(Config, MandatoryFName)),
+    ?assertEqual(
+       True,
+       is_feature_flag_enabled(Config, MandatoryFName)).
+
+clustering_ok_with_supported_mandatory_ff(Config) ->
+    %% All feature flags are disabled. Clustering the two nodes should be
+    %% accepted because they are compatible.
+
+    log_feature_flags_of_all_nodes(Config),
+    ?assertEqual([true, true],
+                 is_feature_flag_supported(Config, ff_from_testsuite)),
+    ?assertEqual([false, false],
+                 is_feature_flag_enabled(Config, ff_from_testsuite)),
+    ?assertEqual([true, true],
+                 is_feature_flag_supported(Config, quorum_queue)),
+    ?assertEqual([true, true],
+                 is_feature_flag_enabled(Config, quorum_queue)),
+
+    ?assertEqual(Config, rabbit_ct_broker_helpers:cluster_nodes(Config)),
+
+    log_feature_flags_of_all_nodes(Config),
+    ?assertEqual([true, true],
+                 is_feature_flag_supported(Config, ff_from_testsuite)),
+    ?assertEqual([false, false],
+                 is_feature_flag_enabled(Config, ff_from_testsuite)),
+    ?assertEqual([true, true],
+                 is_feature_flag_supported(Config, quorum_queue)),
+    ?assertEqual([true, true],
+                 is_feature_flag_enabled(Config, quorum_queue)),
     ok.
 
 activating_plugin_with_new_ff_disabled(Config) ->
