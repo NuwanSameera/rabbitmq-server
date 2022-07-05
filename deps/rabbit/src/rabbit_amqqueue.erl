@@ -1763,13 +1763,20 @@ has_synchronised_mirrors_online(Q) ->
 %% TODO review this one with khepri clustering. It might not be needed anymore?
 %% Also when HA queues are deleted
 on_node_up(Node) ->
-    ok = rabbit_misc:execute_mnesia_transaction(
-           fun () ->
-                   Qs = mnesia:match_object(rabbit_queue,
-                                            amqqueue:pattern_match_all(), write),
-                   [maybe_clear_recoverable_node(Node, Q) || Q <- Qs],
-                   ok
-           end).
+    %% This could be moved to rabbit_store, but is going to be removed anyway with HA queues
+    rabbit_khepri:try_mnesia_or_khepri(
+      fun() ->
+              ok = rabbit_misc:execute_mnesia_transaction(
+                     fun () ->
+                             Qs = mnesia:match_object(rabbit_queue,
+                                                      amqqueue:pattern_match_all(), write),
+                             [maybe_clear_recoverable_node(Node, Q) || Q <- Qs],
+                             ok
+                     end)
+      end,
+      fun() ->
+              ok
+      end).
 
 maybe_clear_recoverable_node(Node, Q) ->
     SPids = amqqueue:get_sync_slave_pids(Q),
