@@ -235,8 +235,7 @@ list_durable_exchanges() ->
               list_in_mnesia(rabbit_durable_exchange, #exchange{_ = '_'})
       end,
       fun() ->
-              Pattern = #if_data_matches{pattern = #exchange{durable = true, _ = '_'}},
-              list_in_khepri(khepri_exchanges_path() ++ [?STAR, Pattern])
+              list_in_khepri(khepri_exchanges_path() ++ [?STAR_STAR])
       end).
 
 match_exchanges(Pattern0) ->
@@ -1345,8 +1344,9 @@ mnesia_write_to_khepri(rabbit_durable_queue, Q, _ExtraArgs) ->
 %% If ram table is migrated first, the record will be moved as is.
 %% If the disc table is migrated first, the record is updated with
 %% the exchange decorators.
-mnesia_write_to_khepri(rabbit_exchange, #exchange{name = Resource} = Exchange, _ExtraArgs) ->
+mnesia_write_to_khepri(rabbit_exchange, #exchange{name = Resource} = Exchange0, _ExtraArgs) ->
     Path = khepri_exchange_path(Resource),
+    Exchange = rabbit_exchange_decorator:set(Exchange0),
     khepri_create(Path, Exchange);
 mnesia_write_to_khepri(rabbit_durable_exchange, #exchange{name = Resource} = Exchange0,
                        _ExtraArgs) ->
@@ -1666,29 +1666,19 @@ recover_exchanges(VHost, mnesia) ->
       end,
       rabbit_durable_exchange);
 recover_exchanges(VHost, khepri) ->
-    %% Khepri does not have ram tables, so data will not be lost
-    %% once a node is restarted. Thus, a single table with
-    %% idempotent recovery is enough. The exchange record already
-    %% contains the durable flag and we use it to clean up or recover
-    %% records.
+    %% Transient exchanges are deprecated in Khepri, all exchanges are recovered
+    Exchanges0 = list_in_khepri(khepri_exchanges_path() ++ [VHost, ?STAR_STAR]),
+    Exchanges = [rabbit_exchange_decorator:set(X) || X <- Exchanges0],
 
-    %% TODO transient exchanges don't work. Maybe transient queues neither!!
-    %% TODO only works single node. multi-node if other nodes are up -> table should not be deleted!
-    DurablePattern = #if_data_matches{pattern = #exchange{durable = true, _ = '_'}},
-    DurableExchanges0 = list_in_khepri(khepri_exchanges_path() ++ [VHost, DurablePattern]),
-    DurableExchanges = [rabbit_exchange_decorator:set(X) || X <- DurableExchanges0],
-
-    TransientPattern = #if_data_matches{pattern = #exchange{durable = false, _ = '_'}},
     rabbit_khepri:transaction(
       fun() ->
-              [_ = store_exchange_in_khepri(X) || X <- DurableExchanges],
-              _ = khepri_tx:delete(khepri_exchanges_path() ++ [VHost, TransientPattern])
+              [_ = store_exchange_in_khepri(X) || X <- Exchanges]
       end),
     %% TODO once mnesia is gone, this callback should go back to `rabbit_exchange`
     [begin
          rabbit_exchange:callback(X, create, [transaction, none], [X])
-     end || X <- DurableExchanges],
-    DurableExchanges.
+     end || X <- Exchanges],
+    Exchanges.
 
 lookup_tx_in_mnesia(Name) ->
     mnesia:wread(Name).
