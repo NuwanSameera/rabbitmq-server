@@ -155,12 +155,6 @@ khepri_queues_path() ->
 khepri_queue_path(#resource{virtual_host = VHost, name = Name}) ->
     [?MODULE, queues, VHost, Name].
 
-khepri_durable_queues_path() ->
-    [?MODULE, durable_queues].
-
-khepri_durable_queue_path(#resource{virtual_host = VHost, name = Name}) ->
-    [?MODULE, durable_queues, VHost, Name].
-
 %% Listeners
 khepri_listener_path(Node) ->
     [?MODULE, listeners, Node].
@@ -608,7 +602,7 @@ list_durable_queues() ->
       end,
       fun() -> list_queues_with_possible_retry_in_khepri(
                  fun() ->
-                         list_in_khepri(khepri_durable_queues_path() ++ [?STAR_STAR])
+                         list_in_khepri(khepri_queues_path() ++ [?STAR_STAR])
                  end)
       end).
 
@@ -657,7 +651,7 @@ list_durable_queues(VHost) ->
       end,
       fun() -> list_queues_with_possible_retry_in_khepri(
                  fun() ->
-                         list_in_khepri(khepri_durable_queues_path() ++ [VHost, ?STAR_STAR])
+                         list_in_khepri(khepri_queues_path() ++ [VHost, ?STAR_STAR])
                  end)
       end).
 
@@ -724,7 +718,7 @@ store_durable_queue(Q) ->
                 end)
       end,
       fun() ->
-              Path = khepri_durable_queue_path(amqqueue:get_name(Q)),
+              Path = khepri_queue_path(amqqueue:get_name(Q)),
               case rabbit_khepri:put(Path, Q) of
                   {ok, _} -> ok;
                   Error   -> Error
@@ -739,7 +733,7 @@ lookup_queue(Name) ->
 lookup_durable_queue(Name) ->
     rabbit_khepri:try_mnesia_or_khepri(
       fun() -> lookup({rabbit_durable_queue, Name}, mnesia) end,
-      fun() -> lookup(khepri_durable_queue_path(Name), khepri) end).
+      fun() -> lookup(khepri_queue_path(Name), khepri) end).
 
 %% TODO this should be internal, it's here because of mirrored queues
 lookup_queue_in_khepri_tx(Name) ->
@@ -755,7 +749,7 @@ lookup_queues(Name) ->
 lookup_durable_queues(Names) when is_list(Names) ->
     rabbit_khepri:try_mnesia_or_khepri(
       fun() -> lookup_many(rabbit_durable_queue, Names, mnesia) end,
-      fun() -> lookup_many(fun khepri_durable_queue_path/1, Names, khepri) end);
+      fun() -> lookup_many(fun khepri_queue_path/1, Names, khepri) end);
 lookup_durable_queues(Name) ->
     lookup_durable_queue(Name).
 
@@ -789,17 +783,10 @@ store_queue(DurableQ, Q) ->
       end,
       fun() ->
               Path = khepri_queue_path(QName),
-              DurablePath = khepri_durable_queue_path(QName),
-              rabbit_khepri:transaction(
-                fun() ->
-                        case ?amqqueue_is_durable(Q) of
-                            true ->
-                                store_in_khepri(DurablePath, DurableQ);
-                            false ->
-                                ok
-                        end,
-                        store_in_khepri(Path, Q)
-                end)
+              case rabbit_khepri:put(Path, DurableQ) of
+                  {ok, _} -> ok;
+                  Error -> Error
+              end
       end).
 
 store_queue_without_recover(DurableQ, Q) ->
@@ -830,7 +817,6 @@ store_queue_without_recover(DurableQ, Q) ->
       end,
       fun() ->
               Path = khepri_queue_path(QueueName),
-              DurablePath = khepri_durable_queue_path(QueueName),
               rabbit_khepri:transaction(
                 fun() ->
                         case khepri_tx:get(Path) of
@@ -839,13 +825,7 @@ store_queue_without_recover(DurableQ, Q) ->
                             _ ->
                                 case not_found_or_absent_queue_in_khepri_tx(QueueName) of
                                     not_found ->
-                                        case ?amqqueue_is_durable(DurableQ) of
-                                            true ->
-                                                store_in_khepri(DurablePath, DurableQ);
-                                            false ->
-                                                ok
-                                        end,
-                                        store_in_khepri(Path, Q),
+                                        store_in_khepri(Path, DurableQ),
                                         {created, DurableQ};
                                     {absent, _, _} = R ->
                                         R
@@ -880,7 +860,7 @@ store_queues(Qs) ->
               rabbit_khepri:transaction(
                 fun() ->
                         [begin
-                             Path = khepri_durable_queue_path(amqqueue:get_name(Q)),
+                             Path = khepri_queue_path(amqqueue:get_name(Q)),
                              store_in_khepri(Path, Q)
                          end || Q <- Qs]
                 end)
@@ -1326,7 +1306,7 @@ mnesia_write_to_khepri(rabbit_queue, Q, _ExtraArgs) ->
         Error -> throw(Error)
     end;
 mnesia_write_to_khepri(rabbit_durable_queue, Q, _ExtraArgs) ->
-    Path = khepri_durable_queue_path(amqqueue:get_name(Q)),
+    Path = khepri_queue_path(amqqueue:get_name(Q)),
     case rabbit_khepri:put(Path, Q) of
         {ok, _} -> ok;
         Error -> throw(Error)
@@ -1410,9 +1390,9 @@ mnesia_delete_to_khepri(rabbit_queue, Q, _ExtraArgs) when ?is_amqqueue(Q) ->
 mnesia_delete_to_khepri(rabbit_queue, Name, _ExtraArgs) when is_record(Name, resource) ->
     khepri_delete(khepri_queue_path(Name));
 mnesia_delete_to_khepri(rabbit_durable_queue, Q, _ExtraArgs) when ?is_amqqueue(Q) ->
-    khepri_delete(khepri_durable_queue_path(amqqueue:get_name(Q)));
+    khepri_delete(khepri_queue_path(amqqueue:get_name(Q)));
 mnesia_delete_to_khepri(rabbit_durable_queue, Name, _ExtraArgs) when is_record(Name, resource) ->
-    khepri_delete(khepri_durable_queue_path(Name));
+    khepri_delete(khepri_queue_path(Name));
 mnesia_delete_to_khepri(rabbit_listener, Listener, _ExtraArgs) when is_record(Listener, listener) ->
     khepri_delete(khepri_listener_path(Listener#listener.node));
 mnesia_delete_to_khepri(rabbit_listener, Node, _ExtraArgs) ->
@@ -1467,7 +1447,7 @@ mnesia_delete_to_khepri(_Table, Key, #{type := tracking_counter, name := Name, n
 clear_data_in_khepri(rabbit_queue, _ExtraArgs) ->
     khepri_delete(khepri_queues_path());
 clear_data_in_khepri(rabbit_durable_queue, _ExtraArgs) ->
-    khepri_delete(khepri_durable_queues_path());
+    khepri_delete(khepri_queues_path());
 clear_data_in_khepri(rabbit_listener, _ExtraArgs) ->
     khepri_delete(khepri_listeners_path());
 clear_data_in_khepri(rabbit_exchange, _ExtraArgs) ->
@@ -1796,7 +1776,7 @@ not_found_or_absent_in_khepri(#resource{kind = queue}    = Name) ->
 not_found_or_absent_queue_in_khepri_tx(Name) ->
     %% NB: we assume that the caller has already performed a lookup on
     %% rabbit_queue and not found anything
-    Path = khepri_durable_queue_path(Name),
+    Path = khepri_queue_path(Name),
     case khepri_tx:get(Path) of
         {ok, #{Path := #{data := Q}}} -> {absent, Q, nodedown}; %% Q exists on stopped node
         _  -> not_found
@@ -1806,7 +1786,7 @@ not_found_or_absent_queue_in_khepri(Name) ->
     %% NB: we assume that the caller has already performed a lookup on
     %% rabbit_queue and not found anything
     %% This might hit khepri cache, vs a full transaction
-    Path = khepri_durable_queue_path(Name),
+    Path = khepri_queue_path(Name),
     case rabbit_khepri:get_data(Path) of
         {ok, Q} -> {absent, Q, nodedown}; %% Q exists on stopped node
         _  -> not_found
@@ -2517,9 +2497,7 @@ internal_delete_queue_in_mnesia(QueueName, OnlyDurable, Reason) ->
 
 internal_delete_queue_in_khepri(QueueName, OnlyDurable, _Reason) ->
     Path = khepri_queue_path(QueueName),
-    DurablePath = khepri_durable_queue_path(QueueName),
     {ok, _} = khepri_tx:delete(Path),
-    {ok, _} = khepri_tx:delete(DurablePath),
     %% we want to execute some things, as decided by rabbit_exchange,
     %% after the transaction.
     remove_bindings_for_destination_in_khepri(QueueName, OnlyDurable).
@@ -2540,9 +2518,8 @@ delete_queue_in_mnesia(QueueName, Reason) ->
 delete_queue_in_khepri(Name, Reason) ->
     rabbit_khepri:transaction(
       fun () ->
-              case {lookup_tx_in_khepri(khepri_queue_path(Name)),
-                    lookup_tx_in_khepri(khepri_durable_queue_path(Name))} of
-                  {[], []} ->
+              case lookup_tx_in_khepri(khepri_queue_path(Name)) of
+                  [] ->
                       ok;
                   _ ->
                       internal_delete_queue_in_khepri(Name, false, Reason)
@@ -2585,16 +2562,8 @@ update_queue_in_khepri(Name, Fun) ->
     Path = khepri_queue_path(Name),
     case khepri_tx:get(Path) of
         {ok, #{Path := #{data := Q}}} ->
-            Durable = amqqueue:is_durable(Q),
             Q1 = Fun(Q),
             {ok, _} = khepri_tx:put(Path, Q1),
-            case Durable of
-                true ->
-                    DurablePath = khepri_durable_queue_path(Name),
-                    {ok, _} = khepri_tx:put(DurablePath, Q1);
-                _ ->
-                    ok
-            end,
             Q1;
         _  ->
             not_found
