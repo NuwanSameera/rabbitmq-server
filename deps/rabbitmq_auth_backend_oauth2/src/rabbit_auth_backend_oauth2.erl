@@ -34,6 +34,8 @@
 
 -define(APP, rabbitmq_auth_backend_oauth2).
 -define(RESOURCE_SERVER_ID, resource_server_id).
+%% a term defined for Rich Authorization Request tokens to identify a RabbitMQ permission
+-define(RESOURCE_SERVER_TYPE, resource_server_type).
 %% a term used by the IdentityServer community
 -define(COMPLEX_CLAIM_APP_ENV_KEY, extra_scopes_source).
 %% scope aliases map "role names" to a set of scopes
@@ -197,7 +199,12 @@ post_process_payload(Payload, AppEnv) when is_map(Payload) ->
         false -> Payload2
         end,
 
-    Payload3.
+    Payload4 = case maps:is_key(<<"authorization_details">>, Payload3) of
+        true  -> post_process_payload_in_rich_auth_request_format(Payload3);
+        false -> Payload1
+        end,
+
+    Payload4.
 
 -spec has_configured_scope_aliases(AppEnv :: app_env()) -> boolean().
 has_configured_scope_aliases(AppEnv) ->
@@ -324,6 +331,27 @@ extract_scopes_from_keycloak_permissions(Acc, [H | T]) when is_map(H) ->
     extract_scopes_from_keycloak_permissions(Acc ++ Scopes, T);
 extract_scopes_from_keycloak_permissions(Acc, [_ | T]) ->
     extract_scopes_from_keycloak_permissions(Acc, T).
+
+
+-spec post_process_payload_in_rich_auth_request_format(Payload :: map()) -> map().
+%% https://oauth.net/2/rich-authorization-requests/
+post_process_payload_in_rich_auth_request_format(#{<<"authorization_details">> := Permissions} = Payload) ->
+    rabbit_log:error("Received Permisions: '~s'",[Permissions]),
+    Rich_auth_permission_for_rabbitmq = fun(P) -> rich_auth_permission_for_rabbitmq(P) end,
+    Filtered_Permissions = lists:filter(Rich_auth_permission_for_rabbitmq, Permissions),
+    AdditionalScopes = [ ],
+    ExistingScopes = maps:get(?SCOPE_JWT_FIELD, Payload),
+    maps:put(?SCOPE_JWT_FIELD, AdditionalScopes ++ ExistingScopes, Payload).
+
+rich_auth_permission_for_rabbitmq(Permission) ->
+  case application:get_env(?APP, ?RESOURCE_SERVER_TYPE, undefined) of
+    undefined -> false;
+    ResourceServerTypeAsBinary when is_binary(ResourceServerTypeAsBinary) ->
+      case maps:get(<<"type">>, Permission, undefined) of
+        TypeAsBinary when is_binary(TypeAsBinary) -> TypeAsBinary == ResourceServerTypeAsBinary;
+        _ -> false
+      end
+  end.
 
 validate_payload(#{?SCOPE_JWT_FIELD := _Scope, ?AUD_JWT_FIELD := _Aud} = DecodedToken) ->
     ResourceServerEnv = application:get_env(?APP, ?RESOURCE_SERVER_ID, <<>>),

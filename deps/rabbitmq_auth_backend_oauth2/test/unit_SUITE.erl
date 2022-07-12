@@ -29,6 +29,7 @@ all() ->
         test_incorrect_kid,
         test_post_process_token_payload,
         test_post_process_token_payload_keycloak,
+        test_post_process_payload_rich_auth_request,
         test_post_process_token_payload_complex_claims,
         test_successful_access_with_a_token_that_uses_single_scope_alias_in_scope_field,
         test_successful_access_with_a_token_that_uses_multiple_scope_aliases_in_scope_field,
@@ -58,6 +59,10 @@ init_per_testcase(test_post_process_token_payload_complex_claims, Config) ->
   application:set_env(rabbitmq_auth_backend_oauth2, resource_server_id, <<"rabbitmq">>),
   Config;
 
+init_per_testcase(test_post_process_payload_rich_auth_request, Config) ->
+  application:set_env(rabbitmq_auth_backend_oauth2, resource_server_type, <<"rabbitmq-type">>),
+  Config;
+
 init_per_testcase(_, Config) ->
   Config.
 
@@ -68,12 +73,14 @@ end_per_testcase(test_post_process_token_payload_complex_claims, Config) ->
 end_per_testcase(_, Config) ->
   Config.
 
+
 %%
 %% Test Cases
 %%
 
 -define(UTIL_MOD, rabbit_auth_backend_oauth2_test_util).
 -define(RESOURCE_SERVER_ID, <<"rabbitmq">>).
+-define(RESOURCE_SERVER_TYPE, <<"rabbitmq-type">>).
 
 test_post_process_token_payload(_) ->
     ArgumentsExpections = [
@@ -162,6 +169,61 @@ post_process_payload_with_keycloak_authorization(Authorization) ->
     rabbit_auth_backend_oauth2:post_process_payload(Payload).
 
 
+test_post_process_payload_rich_auth_request(_) ->
+  Pairs = [
+      %% simple case: 1 permission with 1 location meant for this resource_server_id
+     {
+        %% permissions
+        [
+         #{<<"type">> => ?RESOURCE_SERVER_TYPE,
+           <<"locations">> => [<<"cluster:rabbitmq-resource">>],
+           <<"actions">> => [<<"read">>]
+           },
+         #{<<"type">> => ?RESOURCE_SERVER_TYPE,
+          <<"locations">> => [<<"cluster:rabbitmq-other">>],
+          <<"actions">> => [<<"write">>]
+          },
+         #{<<"type">> => <<"other">>
+          }
+        ]
+        ,
+        %% expected scopes given the permissions above
+        [<<"rabbitmq-resource.read:*/*">> ]
+    }
+    ,
+      %% 1 permission with at least 1 location for this rabbitmq server
+     {
+          [
+            #{<<"type">> => ?RESOURCE_SERVER_TYPE,
+             <<"locations">> => [<<"cluster:rabbitmq-server">>,<<"cluster:rabbitmq-other">>],
+             <<"actions">> => [<<"read">>]
+             },
+           #{<<"type">> => ?RESOURCE_SERVER_TYPE,
+            <<"locations">> => [<<"cluster:rabbitmq-other">>],
+            <<"actions">> => [<<"write">>]
+            }
+          ]
+          ,
+          [<<"rabbitmq-resource.read:*/*">> ]
+      }
+
+    ,
+    %% no permissions
+     {[],[]}
+
+  ],
+  lists:foreach(
+      fun({Permissions, ExpectedScope}) ->
+          Payload = post_process_payload_with_rich_auth_request(Permissions),
+          ?assertEqual(ExpectedScope, maps:get(<<"scope">>, Payload))
+      end, Pairs).
+
+post_process_payload_with_rich_auth_request(Permissions) ->
+    Jwk = ?UTIL_MOD:fixture_jwk(),
+    Token = maps:put(<<"authorization_details">>, Permissions, ?UTIL_MOD:fixture_token_with_scopes([])),
+    {_, EncodedToken} = ?UTIL_MOD:sign_token_hs(Token, Jwk),
+    {true, Payload} = uaa_jwt_jwt:decode_and_verify(Jwk, EncodedToken),
+    rabbit_auth_backend_oauth2:post_process_payload(Payload).
 
 test_post_process_token_payload_complex_claims(_) ->
     Pairs = [
