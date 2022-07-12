@@ -460,9 +460,8 @@ list_bindings(VHost) ->
               [B || #route{binding = B} <- list_in_mnesia(rabbit_route, Match)]
       end,
       fun() ->
-              Condition = #if_not{condition = #if_data_matches{pattern = #{status => down}}},
-              Path = khepri_routes_path() ++ [VHost, ?STAR_STAR, Condition],
-              lists:foldl(fun(#{bindings := SetOfBindings}, Acc) ->
+              Path = khepri_routes_path() ++ [VHost, ?STAR_STAR],
+              lists:foldl(fun(SetOfBindings, Acc) ->
                                   sets:to_list(SetOfBindings) ++ Acc
                           end, [], list_in_khepri(Path))
       end).
@@ -475,7 +474,7 @@ list_bindings_for_source(#resource{virtual_host = VHost, name = Name} = Resource
       end,
       fun() ->
               Path = khepri_routes_path() ++ [VHost, Name, ?STAR_STAR],
-              lists:foldl(fun(#{bindings := SetOfBindings}, Acc) ->
+              lists:foldl(fun(SetOfBindings, Acc) ->
                                   sets:to_list(SetOfBindings) ++ Acc
                           end, [], list_in_khepri(Path))
       end).
@@ -491,7 +490,7 @@ list_bindings_for_destination(#resource{virtual_host = VHost, name = Name,
       end,
       fun() ->
               Path = khepri_routes_path() ++ [VHost, ?STAR, Kind, Name, ?STAR_STAR],
-              lists:foldl(fun(#{bindings := SetOfBindings}, Acc) ->
+              lists:foldl(fun(SetOfBindings, Acc) ->
                                   sets:to_list(SetOfBindings) ++ Acc
                           end, [], list_in_khepri(Path))
       end).
@@ -506,7 +505,7 @@ list_bindings_for_source_and_destination(SrcName, DstName) ->
       end,
       fun() ->
               Values = match_source_and_destination_in_khepri(SrcName, DstName),
-              lists:foldl(fun(#{bindings := SetOfBindings}, Acc) ->
+              lists:foldl(fun(SetOfBindings, Acc) ->
                                   sets:to_list(SetOfBindings) ++ Acc
                           end, [], Values)
       end).
@@ -529,7 +528,7 @@ list_explicit_bindings() ->
               Condition = #if_not{condition = #if_name_matches{regex = "^$"}},
               Path = khepri_routes_path() ++ [?STAR, Condition, ?STAR_STAR],
               {ok, Data} = rabbit_khepri:match_and_get_data(Path),
-              lists:foldl(fun(#{bindings := SetOfBindings}, Acc) ->
+              lists:foldl(fun(SetOfBindings, Acc) ->
                                   sets:to_list(SetOfBindings) ++ Acc
                           end, [], maps:values(Data))
       end).
@@ -549,23 +548,24 @@ recover_bindings(RecoverFun) ->
                       rabbit_misc:dirty_read_all(rabbit_semi_durable_route)]
       end,
       fun() ->
+              %% There are no more semi durable routes in Khepri, all durable must be
+              %% recovered
               Root = khepri_routes_path(),
-              {ok, Map} = rabbit_khepri:match_and_get_data(
-                            Root ++ [?STAR_STAR, #if_data_matches{pattern = #{type => semi_durable}}]),
+              {ok, Map} = rabbit_khepri:match_and_get_data(Root ++ [?STAR_STAR]),
               maps:foreach(
                 fun(Path, _) ->
                         Dst = destination_from_khepri_path(Path),
                         Src = source_from_khepri_path(Path),
                         RecoverFun(Path, Src, Dst, fun recover_semi_durable_route_txn/3, khepri)
                 end, Map),
-              {ok, MaybeDown} = rabbit_khepri:match_and_get_data(
-                                  Root ++ [?STAR_STAR, #if_data_matches{pattern = #{type => durable}}]),
+              {ok, Down} = rabbit_khepri:match_and_get_data(
+                             Root ++ [?STAR_STAR, #if_data_matches{pattern = #{status => down}}]),
               rabbit_khepri:transaction(
                 fun() ->
                         maps:foreach(
                           fun(K, V) ->
                                   {ok, _} = khepri_tx:put(K, V#{status => up})
-                          end, MaybeDown)
+                          end, Down)
                 end)
       end).
 
@@ -702,11 +702,7 @@ delete_transient_queues(Queues) ->
                 end)
       end,
       fun() ->
-              rabbit_khepri:transaction(
-                fun() ->
-                        [{QName, delete_transient_queue_in_khepri(QName)}
-                         || QName <- Queues]
-                end, rw)
+              []
       end).
 
 store_durable_queue(Q) ->
@@ -783,7 +779,7 @@ store_queue(DurableQ, Q) ->
       end,
       fun() ->
               Path = khepri_queue_path(QName),
-              case rabbit_khepri:put(Path, DurableQ) of
+              case rabbit_khepri:put(Path, Q) of
                   {ok, _} -> ok;
                   Error -> Error
               end
@@ -825,8 +821,8 @@ store_queue_without_recover(DurableQ, Q) ->
                             _ ->
                                 case not_found_or_absent_queue_in_khepri_tx(QueueName) of
                                     not_found ->
-                                        store_in_khepri(Path, DurableQ),
-                                        {created, DurableQ};
+                                        store_in_khepri(Path, Q),
+                                        {created, Q};
                                     {absent, _, _} = R ->
                                         R
                                 end
@@ -885,7 +881,7 @@ match_bindings(SrcName, Match) ->
       end,
       fun() ->
               Data = match_source_in_khepri(SrcName),
-              Bindings = lists:foldl(fun(#{bindings := SetOfBindings}, Acc) ->
+              Bindings = lists:foldl(fun(SetOfBindings, Acc) ->
                                              sets:to_list(SetOfBindings) ++ Acc
                                      end, [], maps:values(Data)),
               [Dest || Binding = #binding{destination = Dest} <- Bindings, Match(Binding)]
@@ -1305,12 +1301,11 @@ mnesia_write_to_khepri(rabbit_queue, Q, _ExtraArgs) ->
         {ok, _} -> ok;
         Error -> throw(Error)
     end;
-mnesia_write_to_khepri(rabbit_durable_queue, Q, _ExtraArgs) ->
-    Path = khepri_queue_path(amqqueue:get_name(Q)),
-    case rabbit_khepri:put(Path, Q) of
-        {ok, _} -> ok;
-        Error -> throw(Error)
-    end;
+mnesia_write_to_khepri(rabbit_durable_queue, Q0, _ExtraArgs) ->
+    Path = khepri_queue_path(amqqueue:get_name(Q0)),
+    Decorators = rabbit_queue_decorator:active(Q0),
+    Q = amqqueue:set_decorators(Q0, Decorators),
+    khepri_create(Path, Q);
 %% Mnesia contains two tables if an exchange has been recovered:
 %% rabbit_exchange (ram) and rabbit_durable_exchange (disc).
 %% As all data in Khepri is persistent, there is no point on
@@ -1343,11 +1338,11 @@ mnesia_write_to_khepri(rabbit_exchange_serial, #exchange_serial{name = Resource}
         Error -> throw(Error)
     end;
 mnesia_write_to_khepri(rabbit_route, #route{binding = Binding}, _ExtraArgs)->
-    store_binding(Binding, transient);
+    store_binding(Binding);
 mnesia_write_to_khepri(rabbit_durable_route, #route{binding = Binding}, _ExtraArgs)->
-    store_binding(Binding, durable);
+    store_binding(Binding);
 mnesia_write_to_khepri(rabbit_semi_durable_route, #route{binding = Binding}, _ExtraArgs)->
-    store_binding(Binding, semi_durable);
+    store_binding(Binding);
 mnesia_write_to_khepri(rabbit_reverse_route, _, _ExtraArgs) ->
     ok;
 mnesia_write_to_khepri(rabbit_topic_trie_binding,
@@ -1361,7 +1356,7 @@ mnesia_write_to_khepri(rabbit_topic_trie_binding,
     %% but that is fine. Migration happens only once, so it is better to do a bit more of work
     %% than skipping bindings because out of order arguments.
     Values = rabbit_store:match_source_and_destination_in_khepri(X, D),
-    Bindings = lists:foldl(fun(#{bindings := SetOfBindings}, Acc) ->
+    Bindings = lists:foldl(fun(SetOfBindings, Acc) ->
                                    sets:to_list(SetOfBindings) ++ Acc
                            end, [], Values),
     [add_topic_trie_binding(X, K, D, Args) || #binding{key = K,
@@ -1700,7 +1695,7 @@ lookup_resource_in_khepri_tx(#resource{kind = exchange} = Name) ->
 
 exists_binding_in_khepri(Path, Binding) ->
     case khepri_tx:get(Path) of
-        {ok, #{Path := #{data := #{bindings := Set}}}} ->
+        {ok, #{Path := #{data := Set}}} ->
             sets:is_element(Binding, Set);
         _ ->
             false
@@ -1816,25 +1811,24 @@ serial_in_khepri(false, _) ->
 serial_in_khepri(true, X) ->
     next_exchange_serial_in_khepri(X).
 
-bindings_data(Path, BindingType) ->
+bindings_data(Path) ->
     case khepri_tx:get(Path) of
-        {ok, #{Path := #{data := Data}}} ->
-            Data;
+        {ok, #{Path := #{data := Set}}} ->
+            Set;
         _ ->
-            #{bindings => sets:new(), type => BindingType, status => up}
+            sets:new()
     end.
 
-store_binding(Binding, BindingType) ->
+store_binding(Binding) ->
     Path = khepri_route_path(Binding),
     rabbit_khepri:transaction(
       fun() ->
-              add_binding_tx(Path, Binding, BindingType)
+              add_binding_tx(Path, Binding)
       end, rw).
 
-add_binding_tx(Path, Binding, BindingType) ->
-    Data0 = #{bindings := Set} = bindings_data(Path, BindingType),
-    Data = Data0#{bindings => sets:add_element(Binding, Set)},
-    {ok, _} = khepri_tx:put(Path, Data),
+add_binding_tx(Path, Binding) ->
+    Set = bindings_data(Path),
+    {ok, _} = khepri_tx:put(Path, sets:add_element(Binding, Set)),
     add_routing(Binding),
     ok.
 
@@ -1875,12 +1869,12 @@ add_binding_in_khepri(#binding{source = SrcName,
     case lookup_resources(SrcName, DstName) of
         {[Src], [Dst]} ->
             case ChecksFun(Src, Dst) of
-                {ok, BindingType} ->
+                {ok, _BindingType} ->
                     Path = khepri_route_path(Binding),
                     MaybeSerial = rabbit_exchange:serialise_events(Src),
                     Serial = rabbit_khepri:transaction(
                                fun() ->
-                                       add_binding_tx(Path, Binding, BindingType),
+                                       add_binding_tx(Path, Binding),
                                        serial_in_khepri(MaybeSerial, Src)
                                end, rw),
                     rabbit_exchange:callback(Src, add_binding, [transaction, Serial], [Src, Binding]),
@@ -2162,13 +2156,13 @@ delete_binding_in_mnesia(Binding) ->
 delete_binding_in_khepri(Binding) ->
     Path = khepri_route_path(Binding),
     case khepri_tx:get(Path) of
-        {ok, #{Path := #{data := #{bindings := Set0} = Data}}} ->
+        {ok, #{Path := #{data := Set0}}} ->
             Set = sets:del_element(Binding, Set0),
             case sets:is_empty(Set) of
                 true ->
                     {ok, _} = khepri_tx:delete(Path);
                 false ->
-                    {ok, _} = khepri_tx:put(Path, Data#{bindings => Set})
+                    {ok, _} = khepri_tx:put(Path, Set)
             end;
         _ ->
             ok
@@ -2218,8 +2212,7 @@ continue({[_|_], _})         -> true;
 continue({[], Continuation}) -> continue(mnesia:select(Continuation)).
 
 binding_has_for_source_in_khepri(SrcName) ->
-    (maps:size(match_source_in_khepri(SrcName, transient)) > 0)
-        orelse (maps:size(match_source_in_khepri(SrcName, semi_durable)) > 0).
+    maps:size(match_source_in_khepri_tx(SrcName)) > 0.
 
 destination_from_khepri_path([?MODULE, _Type, VHost, _Src, Kind, Dst | _]) ->
     #resource{virtual_host = VHost, kind = Kind, name = Dst}.
@@ -2260,20 +2253,8 @@ match_source_and_key_in_khepri(Src, RoutingKeys) ->
               end
       end, [], RoutingKeys).
 
-match_source_in_khepri(#resource{virtual_host = VHost, name = Name}, Type) ->
-    Path = khepri_routes_path() ++ [VHost, Name]
-        ++ [#if_all{conditions = [?STAR_STAR, #if_data_matches{pattern = #{type => Type}}]}],
-    {ok, Map} = rabbit_khepri:tx_match_and_get_data(Path),
-    Map.
-
 match_destination_in_khepri(#resource{virtual_host = VHost, kind = Kind, name = Name}) ->
     Path = khepri_routes_path() ++ [VHost, ?STAR, Kind, Name, ?STAR_STAR],
-    {ok, Map} = rabbit_khepri:tx_match_and_get_data(Path),
-    Map.
-
-match_destination_in_khepri(#resource{virtual_host = VHost, kind = Kind, name = Name}, Type) ->
-    Path = khepri_routes_path() ++ [VHost, ?STAR, Kind, Name]
-        ++ [#if_all{conditions = [?STAR_STAR, #if_data_matches{pattern = #{type => Type}}]}],
     {ok, Map} = rabbit_khepri:tx_match_and_get_data(Path),
     Map.
 
@@ -2312,13 +2293,11 @@ remove_bindings_for_destination_in_khepri(DstName, OnlyDurable) ->
                 maps:foreach(fun(K, _V) -> khepri_tx:delete(K) end, TransientBindingsMap),
                 TransientBindingsMap;
             true  ->
-                BindingsMap0 = match_destination_in_khepri(DstName, durable),
-                BindingsMap1 = match_destination_in_khepri(DstName, semi_durable),
-                BindingsMap2 = maps:merge(BindingsMap0, BindingsMap1),
-                maps:foreach(fun(K, _V) -> khepri_tx:delete(K) end, BindingsMap2),
-                BindingsMap2
+                BindingsMap0 = match_destination_in_khepri(DstName),
+                maps:foreach(fun(K, _V) -> khepri_tx:delete(K) end, BindingsMap0),
+                BindingsMap0
         end,
-    Bindings = maps:fold(fun(_, #{bindings := Set}, Acc) ->
+    Bindings = maps:fold(fun(_, Set, Acc) ->
                                  sets:to_list(Set) ++ Acc
                          end, [], BindingsMap),
     rabbit_binding:group_bindings_fold(fun maybe_auto_delete_exchange_in_khepri/4,
@@ -2343,22 +2322,13 @@ remove_bindings_for_source_in_mnesia(SrcName, ShouldIndexTable) ->
 remove_bindings_for_source_in_khepri(SrcName) ->
     Bindings = match_source_in_khepri_tx(SrcName),
     maps:foreach(fun(K, _V) -> khepri_tx:delete(K) end, Bindings),
-    maps:fold(fun(_, #{bindings := Set}, Acc) ->
+    maps:fold(fun(_, Set, Acc) ->
                       sets:to_list(Set) ++ Acc
               end, [], Bindings).
 
 -spec remove_transient_bindings_for_destination_in_mnesia(rabbit_types:binding_destination()) -> rabbit_binding:deletions().
 remove_transient_bindings_for_destination_in_mnesia(DstName) ->
     remove_bindings_for_destination_in_mnesia(DstName, false, fun remove_transient_routes/1).
-
-remove_transient_bindings_for_destination_in_khepri(DstName) ->
-    TransientBindingsMap = match_destination_in_khepri(DstName, transient),
-    maps:foreach(fun(K, _V) -> khepri_tx:delete(K) end, TransientBindingsMap),
-    Bindings = maps:fold(fun(_, #{bindings := Set}, Acc) ->
-                                 sets:to_list(Set) ++ Acc
-                         end, [], TransientBindingsMap),
-    rabbit_binding:group_bindings_fold(fun maybe_auto_delete_exchange_in_khepri/4,
-                                       lists:keysort(#binding.source, Bindings), false).
 
 recover_bindings_in_mnesia() ->
     rabbit_misc:execute_mnesia_transaction(
@@ -2391,7 +2361,7 @@ recover_semi_durable_route_txn(Path, X, khepri) ->
     execute_khepri_transaction(
       fun () ->
               case khepri_tx:get(Path) of
-                  {ok, #{Path := #{data := #{bindings := Set}}}} ->
+                  {ok, #{Path := #{data := Set}}} ->
                       {serial_in_khepri(MaybeSerial, X), Set};
                   _ ->
                       no_recover
@@ -2529,19 +2499,6 @@ delete_queue_in_khepri(Name, Reason) ->
 delete_transient_queue_in_mnesia(QName) ->
     ok = mnesia:delete({rabbit_queue, QName}),
     remove_transient_bindings_for_destination_in_mnesia(QName).
-
-delete_transient_queue_in_khepri(QName) ->
-    %% A durable classic queue with only one replica might be removed from
-    %% the transient queue table on node down. As it is durable, so are its bindings.
-    %% To avoid these bindings to be listed while the queue is down, we need to mark
-    %% them appropiately. 
-    mark_durable_bindings_down_for_destination_in_khepri(QName),
-    {ok, _} = khepri_tx:delete(khepri_queue_path(QName)),
-    remove_transient_bindings_for_destination_in_khepri(QName).
-
-mark_durable_bindings_down_for_destination_in_khepri(DstName) ->
-    TransientBindingsMap = match_destination_in_khepri(DstName, durable),
-    maps:foreach(fun(K, V) -> khepri_tx:put(K, V#{status => down}) end, TransientBindingsMap).
 
 update_queue_in_mnesia(Name, Fun) ->
     case mnesia:wread({rabbit_queue, Name}) of

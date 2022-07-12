@@ -35,10 +35,10 @@ groups() ->
                              from_mnesia_to_khepri
                             ]},
      {mnesia_cluster, [], [
-                           transient_queue_on_node_down
+                           transient_queue_on_node_down_mnesia
                           ]},
      {khepri_cluster, [], [
-                           transient_queue_on_node_down
+                           transient_queue_on_node_down_khepri
                           ]}
     ].
 
@@ -816,7 +816,60 @@ bind_and_delete_exchange_source(Config) ->
                  rabbit_ct_broker_helpers:rpc(Config, 0, rabbit_binding, list, [<<"/">>])),
     ok.
 
-transient_queue_on_node_down(Config) ->
+transient_queue_on_node_down_mnesia(Config) ->
+    Server = rabbit_ct_broker_helpers:get_node_config(Config, 0, nodename),
+
+    Ch = rabbit_ct_client_helpers:open_channel(Config, Server),
+    Q = ?config(queue_name, Config),
+    QAlt = ?config(alt_queue_name, Config),
+    ?assertEqual({'queue.declare_ok', Q, 0, 0}, declare(Ch, Q, [])),
+    ?assertEqual({'queue.declare_ok', QAlt, 0, 0}, declare(Ch, QAlt, [], false)),
+
+    DefaultExchange = rabbit_misc:r(<<"/">>, exchange, <<>>),
+    QResource = rabbit_misc:r(<<"/">>, queue, Q),
+    QAltResource = rabbit_misc:r(<<"/">>, queue, QAlt),
+    DefaultBinding = binding_record(DefaultExchange, QResource, Q, []),
+    DefaultAltBinding = binding_record(DefaultExchange, QAltResource, QAlt, []),
+
+    %% Binding to the default exchange, it's always present
+    ?assertEqual(lists:sort([DefaultBinding, DefaultAltBinding]),
+                 lists:sort(rabbit_ct_broker_helpers:rpc(Config, 1, rabbit_binding, list, [<<"/">>]))),
+
+    %% Let's bind to other exchange
+    #'queue.bind_ok'{} = amqp_channel:call(Ch, #'queue.bind'{exchange = <<"amq.direct">>,
+                                                             queue = Q,
+                                                             routing_key = Q}),
+    #'queue.bind_ok'{} = amqp_channel:call(Ch, #'queue.bind'{exchange = <<"amq.direct">>,
+                                                             queue = QAlt,
+                                                             routing_key = QAlt}),
+
+    DirectBinding = binding_record(rabbit_misc:r(<<"/">>, exchange, <<"amq.direct">>),
+                                   QResource, Q, []),
+    DirectAltBinding = binding_record(rabbit_misc:r(<<"/">>, exchange, <<"amq.direct">>),
+                                      QAltResource, QAlt, []),
+    Bindings = lists:sort([DefaultBinding, DirectBinding, DefaultAltBinding, DirectAltBinding]),
+
+    ?assertEqual(Bindings,
+                 lists:sort(
+                   rabbit_ct_broker_helpers:rpc(Config, 1, rabbit_binding, list, [<<"/">>]))),
+
+    rabbit_ct_broker_helpers:stop_node(Config, Server),
+
+    ?assertEqual([],
+                 rabbit_ct_broker_helpers:rpc(Config, 1, rabbit_binding, list, [<<"/">>])),
+    ?assertEqual([],
+                 rabbit_ct_broker_helpers:rpc(Config, 1, rabbit_amqqueue, list, [<<"/">>])),
+
+    rabbit_ct_broker_helpers:start_node(Config, Server),
+
+    Bindings1 = lists:sort([DefaultBinding, DirectBinding]),
+    ?awaitMatch(Bindings1,
+                lists:sort(
+                  rabbit_ct_broker_helpers:rpc(Config, 1, rabbit_binding, list, [<<"/">>])),
+                30000),
+    ok.
+
+transient_queue_on_node_down_khepri(Config) ->
     Server = rabbit_ct_broker_helpers:get_node_config(Config, 0, nodename),
     
     Ch = rabbit_ct_client_helpers:open_channel(Config, Server),
@@ -865,8 +918,7 @@ transient_queue_on_node_down(Config) ->
 
     rabbit_ct_broker_helpers:start_node(Config, Server),
 
-    Bindings1 = lists:sort([DefaultBinding, DirectBinding]),
-    ?awaitMatch(Bindings1,
+    ?awaitMatch(Bindings,
                 lists:sort(
                   rabbit_ct_broker_helpers:rpc(Config, 1, rabbit_binding, list, [<<"/">>])),
                 30000),
