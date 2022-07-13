@@ -19,6 +19,7 @@
 all() ->
     [
      {group, cluster_size_1},
+     {group, cluster_size_2_unclustered},
      {group, cluster_size_2}
     ].
 
@@ -36,7 +37,8 @@ groups() ->
                                          remove_binding_node_down_durable_queue
                                         ]},
        {start_feature_flag_disabled, [], [enable_feature_flag]}
-      ]}
+      ]},
+     {cluster_size_2_unclustered, [], [{start_feature_flag_enabled, [], [cluster_formation]}]}
     ].
 
 suite() ->
@@ -56,6 +58,10 @@ init_per_group(cluster_size_1, Config) ->
     rabbit_ct_helpers:set_config(Config, {rmq_nodes_count, 1});
 init_per_group(cluster_size_2, Config) ->
     rabbit_ct_helpers:set_config(Config, {rmq_nodes_count, 2});
+
+init_per_group(cluster_size_2_unclustered, Config) ->
+    rabbit_ct_helpers:set_config(Config, [{rmq_nodes_count, 2},
+                                          {rmq_nodes_clustered, false}]);
 
 init_per_group(start_feature_flag_enabled = Group, Config0) ->
     Config = start_broker(Group, Config0),
@@ -327,6 +333,21 @@ enable_feature_flag(Config) ->
     delete_queue(Ch, Q1),
     delete_queue(Ch, Q2),
     ok.
+
+cluster_formation(Config) ->
+    Servers0 = [Server1, Server2] = rabbit_ct_broker_helpers:get_node_configs(Config, nodename),
+    ?assertMatch([Server1], rabbit_ct_broker_helpers:rpc(Config, 0, mnesia, table_info,
+                                                         [?INDEX_TABLE_NAME, ram_copies])),
+    ?assertMatch([Server2], rabbit_ct_broker_helpers:rpc(Config, 1, mnesia, table_info,
+                                                         [?INDEX_TABLE_NAME, ram_copies])),
+    ok = rabbit_control_helper:command(stop_app, Server1),
+    ok = rabbit_control_helper:command(join_cluster, Server1, [atom_to_list(Server2)], []),
+    rabbit_control_helper:command(start_app, Server1),
+    Servers = lists:sort(Servers0),
+    ?assertMatch(Servers, lists:sort(rabbit_ct_broker_helpers:rpc(Config, 0, mnesia, table_info,
+                                                                  [?INDEX_TABLE_NAME, ram_copies]))),
+    ?assertMatch(Servers, lists:sort(rabbit_ct_broker_helpers:rpc(Config, 1, mnesia, table_info,
+                                                                  [?INDEX_TABLE_NAME, ram_copies]))).
 
 %%%===================================================================
 %%% Helpers
