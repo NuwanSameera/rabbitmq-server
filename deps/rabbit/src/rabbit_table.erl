@@ -15,6 +15,7 @@
     wait_for_replicated/0, exists/1]).
 
 -export([definitions/0]).
+-export([maybe_ensure_index_route_table/0]).
 
 -include_lib("rabbit_common/include/rabbit.hrl").
 
@@ -90,6 +91,7 @@ wait_for_replicated() ->
 -spec wait_for_replicated(retry()) -> 'ok'.
 
 wait_for_replicated(Retry) ->
+    Definitions = definitions() ++ maybe_index_route_table_definition(),
     wait([Tab || {Tab, TabDef} <- definitions(),
                  not lists:member({local_content, true}, TabDef)], Retry).
 
@@ -418,6 +420,30 @@ pre_khepri_definitions() ->
        {type, bag},
        {match, #listener{_='_'}}]}
     ].
+
+maybe_index_route_table_definition() ->
+    case rabbit_feature_flags:is_enabled(direct_exchange_routing_v2) of
+        true ->
+            Def = rabbit_binding:index_route_table_definition(),
+            [{rabbit_index_route, Def}];
+        false ->
+            []
+    end.
+
+maybe_ensure_index_route_table() ->
+    case rabbit_feature_flags:is_enabled(direct_exchange_routing_v2) of
+        true ->
+            case rabbit_table:ensure_table_copy(rabbit_index_route, node(), ram_copies) of
+                ok ->
+                    ok;
+                {error, Reason} ->
+                    rabbit_log_feature_flags:warning(
+                      "Failed to add copy of table ~s to node ~p: ~p",
+                      [rabbit_index_route, node(), Reason])
+            end;
+        false ->
+            ok
+    end.
 
 binding_match() ->
     #binding{source = exchange_name_match(),
