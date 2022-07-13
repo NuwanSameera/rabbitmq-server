@@ -1874,10 +1874,27 @@ add_binding_in_khepri(#binding{source = SrcName,
                     MaybeSerial = rabbit_exchange:serialise_events(Src),
                     Serial = rabbit_khepri:transaction(
                                fun() ->
-                                       add_binding_tx(Path, Binding),
-                                       serial_in_khepri(MaybeSerial, Src)
+                                       case khepri_tx:get(Path) of
+                                           {ok, #{Path := #{data := Set}}} ->
+                                               case sets:is_element(Binding, Set) of
+                                                   true ->
+                                                       already_exists;
+                                                   false ->
+                                                       {ok, _} = khepri_tx:put(Path, sets:add_element(Binding, Set)),
+                                                       add_routing(Binding),
+                                                       serial_in_khepri(MaybeSerial, Src)
+                                               end;
+                                           _ ->
+                                               {ok, _} = khepri_tx:put(Path, sets:add_element(Binding, sets:new())),
+                                               add_routing(Binding),
+                                               serial_in_khepri(MaybeSerial, Src)
+                                       end
                                end, rw),
-                    rabbit_exchange:callback(Src, add_binding, [transaction, Serial], [Src, Binding]),
+                    case Serial of
+                        already_exists -> ok;
+                        _ ->
+                            rabbit_exchange:callback(Src, add_binding, [transaction, Serial], [Src, Binding])
+                    end,
                     ok;
                 {error, _} = Err ->
                     Err
