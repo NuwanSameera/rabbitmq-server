@@ -435,3 +435,6 @@ parsing_error(#resource{name = XName}, S, #resource{name = DestName}) ->
 %%----------------------------------------------------------------------------
 khepri_jms_topic_exchange_path(#resource{virtual_host = VHost, name = Name}) ->
     [?MODULE, jms_topic_exchange, VHost, Name].
+
+khepri_jms_topic_exchange_path() ->
+    [?MODULE, jms_topic_exchange].
