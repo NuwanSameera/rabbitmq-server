@@ -12,6 +12,7 @@
 -include_lib("common_test/include/ct.hrl").
 -include_lib("eunit/include/eunit.hrl").
 
+
 all() ->
     [
         test_own_scope,
@@ -61,6 +62,7 @@ init_per_testcase(test_post_process_token_payload_complex_claims, Config) ->
 
 init_per_testcase(test_post_process_payload_rich_auth_request, Config) ->
   application:set_env(rabbitmq_auth_backend_oauth2, resource_server_type, <<"rabbitmq-type">>),
+  application:set_env(rabbitmq_auth_backend_oauth2, resource_server_id, <<"rabbitmq">>),
   Config;
 
 init_per_testcase(_, Config) ->
@@ -169,53 +171,145 @@ post_process_payload_with_keycloak_authorization(Authorization) ->
     rabbit_auth_backend_oauth2:post_process_payload(Payload).
 
 
-test_post_process_payload_rich_auth_request(_) ->
-  Pairs = [
-      %% simple case: 1 permission with 1 location meant for this resource_server_id
-     {
-        %% permissions
-        [
-         #{<<"type">> => ?RESOURCE_SERVER_TYPE,
-           <<"locations">> => [<<"cluster:rabbitmq-resource">>],
-           <<"actions">> => [<<"read">>]
-           },
-         #{<<"type">> => ?RESOURCE_SERVER_TYPE,
-          <<"locations">> => [<<"cluster:rabbitmq-other">>],
-          <<"actions">> => [<<"write">>]
-          },
-         #{<<"type">> => <<"other">>
-          }
-        ]
-        ,
-        %% expected scopes given the permissions above
-        [<<"rabbitmq-resource.read:*/*">> ]
-    }
-    ,
-      %% 1 permission with at least 1 location for this rabbitmq server
-     {
-          [
-            #{<<"type">> => ?RESOURCE_SERVER_TYPE,
-             <<"locations">> => [<<"cluster:rabbitmq-server">>,<<"cluster:rabbitmq-other">>],
-             <<"actions">> => [<<"read">>]
-             },
-           #{<<"type">> => ?RESOURCE_SERVER_TYPE,
-            <<"locations">> => [<<"cluster:rabbitmq-other">>],
-            <<"actions">> => [<<"write">>]
-            }
-          ]
-          ,
-          [<<"rabbitmq-resource.read:*/*">> ]
-      }
 
-    ,
-    %% no permissions
-     {[],[]}
+
+test_post_process_payload_rich_auth_request(_) ->
+
+  Pairs = [
+     {  "should filter out those permisions whose type does not match <resource_server_type>",
+        [#{<<"type">> => ?RESOURCE_SERVER_TYPE,
+          <<"locations">> => [<<"cluster:rabbitmq">>],
+          <<"actions">> => [<<"read">>]
+          },
+         #{<<"type">> => <<"unknown">>,
+          <<"locations">> => [<<"cluster:rabbitmq">>],
+          <<"actions">> => [<<"read">>]
+          }
+        ],
+        [<<"rabbitmq.read:*/*/*">> ]
+    },
+    {  "should filter out those permisions whose locations do not refer to cluster : <resource_server_id>",
+       [#{<<"type">> => ?RESOURCE_SERVER_TYPE,
+         <<"locations">> => [<<"cluster:rabbitmq">>],
+         <<"actions">> => [<<"read">>]
+         },
+        #{<<"type">> => ?RESOURCE_SERVER_TYPE,
+         <<"locations">> => [<<"cluster:other">>],
+         <<"actions">> => [<<"read">>]
+         }
+       ],
+       [<<"rabbitmq.read:*/*/*">> ]
+   },
+   {  "should filter out those permisions whose locations do not refer to cluster : <resource_server_id>",
+        [#{<<"type">> => ?RESOURCE_SERVER_TYPE,
+          <<"locations">> => [<<"cluster:rabbitmq">>],
+          <<"actions">> => [<<"read">>]
+          },
+         #{<<"type">> => ?RESOURCE_SERVER_TYPE,
+          <<"locations">> => [<<"cluster:other">>],
+          <<"actions">> => [<<"read">>]
+          }
+        ],
+        [<<"rabbitmq.read:*/*/*">> ]
+    },
+     { "should ignore permissions without actions",
+       [#{<<"type">> => ?RESOURCE_SERVER_TYPE,
+          <<"locations">> => [<<"cluster:rabbitmq">>]
+         }
+        ]
+        ,[]
+      },
+
+     { "should ignore permissions without locations",
+       [#{<<"type">> => ?RESOURCE_SERVER_TYPE,
+         <<"actions">> => [<<"read">>]
+         }
+        ]
+       ,[]
+     },
+      {  "should filter out locations within a permisions not meant for <resource_server_id>",
+         [#{<<"type">> => ?RESOURCE_SERVER_TYPE,
+           <<"locations">> => [<<"cluster:rabbitmq">>, <<"cluster:unknown">> ],
+           <<"actions">> => [<<"read">>]
+           }
+         ],
+         [<<"rabbitmq.read:*/*/*">> ]
+     },
+      {  "should produce as many scopes as actions mulitplied by locations meant for  <resource_server_id>",
+          [#{<<"type">> => ?RESOURCE_SERVER_TYPE,
+            <<"locations">> => [<<"cluster:rabbitmq/vhost:a">>, <<"cluster:rabbitmq/vhost:b">> ],
+            <<"actions">> => [<<"read">>]
+            }
+          ],
+          [<<"rabbitmq.read:a/*/*">>, <<"rabbitmq.read:b/*/*">> ]
+      },
+      {  "should produce as many scopes as locations meant for  <resource_server_id> by actions",
+          [#{<<"type">> => ?RESOURCE_SERVER_TYPE,
+            <<"locations">> => [<<"cluster:rabbitmq/vhost:a">>, <<"cluster:rabbitmq/vhost:b">> ],
+            <<"actions">> => [<<"read">>, <<"write">>]
+            }
+          ],
+          [<<"rabbitmq.read:a/*/*">>, <<"rabbitmq.read:b/*/*">>, <<"rabbitmq.write:a/*/*">>, <<"rabbitmq.write:b/*/*">> ]
+      },
+        {  "should merge all scopes produced by each permission",
+            [#{<<"type">> => ?RESOURCE_SERVER_TYPE,
+              <<"locations">> => [<<"cluster:rabbitmq/vhost:a">> ],
+              <<"actions">> => [<<"read">>]
+              },
+              #{<<"type">> => ?RESOURCE_SERVER_TYPE,
+                <<"locations">> => [<<"cluster:rabbitmq/vhost:b">> ],
+                <<"actions">> => [<<"write">>]
+              }
+            ],
+            [<<"rabbitmq.read:a/*/*">>, <<"rabbitmq.write:b/*/*">> ]
+        },
+        {  "can specify queue only -> on any vhost",
+            [#{<<"type">> => ?RESOURCE_SERVER_TYPE,
+              <<"locations">> => [<<"cluster:rabbitmq/queue:b">> ],
+              <<"actions">> => [<<"read">>]
+              }
+            ],
+            [<<"rabbitmq.read:*/b/*">> ]
+        },
+        {  "can specify exchange only -> on any vhost",
+            [#{<<"type">> => ?RESOURCE_SERVER_TYPE,
+              <<"locations">> => [<<"cluster:rabbitmq/exchange:b">> ],
+              <<"actions">> => [<<"read">>]
+              }
+            ],
+            [<<"rabbitmq.read:*/b/*">> ]
+        },
+        {  "cannot specify exchange and queue unless both have same value",
+            [#{<<"type">> => ?RESOURCE_SERVER_TYPE,
+              <<"locations">> => [<<"cluster:rabbitmq/queue:b/exchange:c">> ],
+              <<"actions">> => [<<"read">>]
+              }
+            ],
+            [ ]
+        },
+          {  "can specify exchange and queue when have same value",
+              [#{<<"type">> => ?RESOURCE_SERVER_TYPE,
+                <<"locations">> => [<<"cluster:rabbitmq/queue:*/exchange:*">> ],
+                <<"actions">> => [<<"read">>]
+                }
+              ],
+              [ <<"rabbitmq.read:*/*/*">> ]
+          },
+        {  "can specifyrouting-key only -> on any vhost and on any queue if that makes sense ",
+            [#{<<"type">> => ?RESOURCE_SERVER_TYPE,
+              <<"locations">> => [<<"cluster:rabbitmq/routing-key:b">> ],
+              <<"actions">> => [<<"read">>]
+              }
+            ],
+            [<<"rabbitmq.read:*/*/b">> ]
+        },
+        { "should ignore permissions which are empty", [],[]}
 
   ],
   lists:foreach(
-      fun({Permissions, ExpectedScope}) ->
+      fun({Case, Permissions, ExpectedScope}) ->
           Payload = post_process_payload_with_rich_auth_request(Permissions),
-          ?assertEqual(ExpectedScope, maps:get(<<"scope">>, Payload))
+          ?assertEqual(lists:sort(ExpectedScope), lists:sort(maps:get(<<"scope">>, Payload)), Case)
       end, Pairs).
 
 post_process_payload_with_rich_auth_request(Permissions) ->

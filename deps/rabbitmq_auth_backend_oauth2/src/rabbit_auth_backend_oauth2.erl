@@ -47,7 +47,6 @@
 
 -define(AUD_JWT_FIELD, <<"aud">>).
 -define(SCOPE_JWT_FIELD, <<"scope">>).
--define(LOCATION_ATTRIBUTES, [<<"cluster">>, <<"vhost">>, <<"queue">>, <<"exchange">>, <<"routing-key>>" ]).
 %%
 %% API
 %%
@@ -201,7 +200,7 @@ post_process_payload(Payload, AppEnv) when is_map(Payload) ->
 
     Payload4 = case maps:is_key(<<"authorization_details">>, Payload3) of
         true  -> post_process_payload_in_rich_auth_request_format(Payload3);
-        false -> Payload1
+        false -> Payload3
         end,
 
     Payload4.
@@ -332,87 +331,101 @@ extract_scopes_from_keycloak_permissions(Acc, [H | T]) when is_map(H) ->
 extract_scopes_from_keycloak_permissions(Acc, [_ | T]) ->
     extract_scopes_from_keycloak_permissions(Acc, T).
 
+put_location_attribute(Attribute, Map) -> put_attribute(binary:split(Attribute, <<":">>, [global, trim_all]), Map).
+put_attribute([Key, Value | _], Map) ->
+  case lists:member(Key, [<<"cluster">>, <<"vhost">>, <<"queue">>, <<"exchange">>, <<"routing-key">> ]) of
+    true -> maps:put(Key, Value, Map);
+    false -> Map
+  end;
+put_attribute([_|_], Map) -> Map.
 
-put_location_attribute(Attribute, Map) when is_binary(Attribute) -> put_location_attribute(binary:split(Attribute, <<":">>, [global, trim_all]), Map);
-%put_location_attribute([Key, Value | _], Map) when lists:member(Key, ?LOCATION_ATTRIBUTES) ->  maps:put(Key, Value, Map), Map;
-put_location_attribute([Key, Value | _], Map) ->  maps:put(Key, Value, Map), Map;
-put_location_attribute(_, Map) -> Map.
 
 % convert [ <<"cluster:A">>, <<"vhost:B" >>, <<"A">>, <<"unknown:C">> ] to #{ <<"cluster">> : <<"A">>, <<"vhost">> : <<"B">> }
 % filtering out non-key-value-pairs and keys which are not part of LOCATION_ATTRIBUTES
-location_attribute_list_to_location_attribute_map(L) -> location_attribute_list_to_location_attribute_map(L, #{});
-location_attribute_list_to_location_attribute_map([H|L],Map) when is_binary(H) -> location_attribute_list_to_location_attribute_map(L, put_location_attribute(H,Map));
-location_attribute_list_to_location_attribute_map([], Map) -> Map.
+convert_attribute_list_to_attribute_map(L) -> convert_attribute_list_to_attribute_map(L, #{}).
+convert_attribute_list_to_attribute_map([H|L],Map) when is_binary(H) -> convert_attribute_list_to_attribute_map(L, put_location_attribute(H,Map));
+convert_attribute_list_to_attribute_map([], Map) ->
+  Map.
 
-build_location(Map) ->
-  Vhost = maps:get(Map, <<"vhost">>, <<"*">>),
-  Queue = maps:get(Map, <<"queue">>, <<"*">>),
-  Exchange = maps:get(Map, <<"exchange">>, <<"*">>),
-  RoutingKey = maps:get(Map, <<"routing-key">>, <<"*">>),
+build_permission_resource_path(Map) ->
+  Vhost = maps:get(<<"vhost">>, Map, <<"*">>),
+  Resource = maps:get(<<"queue">>, Map, maps:get(<<"exchange">>, Map, <<"*">>)),
+  RoutingKey = maps:get(<<"routing-key">>, Map, <<"*">>),
 
-  Resource = case Queue of
-     <<"*">> ->  Exchange;
-     _ -> case Exchange of
-                <<"*">> -> Queue;
-                _ -> {refused, rabbit_misc:format("It is not allowed to specify queue [~p] and exchange [~p] on a location [~p]", [queue, exchange, location])}
-              end
-      end,
   % make sure that Resource is not error
   <<Vhost/binary,"/",Resource/binary,"/",RoutingKey/binary>>.
 
-extract_locations(P) ->
-  Locations = maps:get(P, <<"locations">>, undefined),
-  case Locations of
+map_locations_to_permission_resource_paths(ResourceServerId, L) ->
+  Locations = case L of
     undefined -> [];
     LocationsAsList when is_list(LocationsAsList) ->
-        lists:map(fun(Location) -> build_location(location_attribute_list_to_location_attribute_map(binary:split(Location,<<"/">>,[global,trim_all]))) end, LocationsAsList);
+        lists:map(fun(Location) -> convert_attribute_list_to_attribute_map(binary:split(Location,<<"/">>,[global,trim_all])) end, LocationsAsList);
     LocationsAsBinary when is_binary(LocationsAsBinary) ->
-        [build_location(location_attribute_list_to_location_attribute_map(binary:split(Location,<<"/">>,[global,trim_all])))]
-  end.
+        [convert_attribute_list_to_attribute_map(binary:split(LocationsAsBinary,<<"/">>,[global,trim_all]))]
+    end,
+  lists:map(fun(L2) -> build_permission_resource_path(L2) end, lists:filter(fun(L3) ->
+    (cluster_matches_resource_server_id(L3, ResourceServerId)) and (legal_queue_and_exchange_values(L3)) end, Locations)).
 
-cluster_matches_resource_server_id(Location) ->
-  case maps:get(Location, <<"cluster">>, undefined) of
-    ?RESOURCE_SERVER_ID -> true;
+
+cluster_matches_resource_server_id(#{<<"cluster">> := Cluster}, ResourceServerId) when Cluster == ResourceServerId -> true;
+cluster_matches_resource_server_id(_, _) -> false.
+
+legal_queue_and_exchange_values(#{<<"queue">> := Queue, <<"exchange">> := Exchange}) ->
+  case Queue of
+     <<>> -> case Exchange of
+                  <<>> -> true;
+                  _ -> false
+                end;
+     _ -> case Exchange of
+                Queue -> true;
+                _ -> false
+              end
+    end;
+legal_queue_and_exchange_values(_) -> true.
+
+map_rich_auth_permissions_to_scopes(ResourceServerId, Permissions) -> map_rich_auth_permissions_to_scopes(ResourceServerId, Permissions, []).
+map_rich_auth_permissions_to_scopes(_, [], Acc) -> Acc;
+map_rich_auth_permissions_to_scopes(ResourceServerId, [  #{<<"actions">> := Actions,  <<"locations">> := Locations }  | T ], Acc) ->
+  ResourcePaths = map_locations_to_permission_resource_paths(ResourceServerId, Locations),
+  Scopes = case Actions of
+       undefined -> [];
+       ActionsAsList when is_list(ActionsAsList) ->
+          build_scopes(ResourceServerId, ActionsAsList, ResourcePaths);
+       ActionsAsBinary when is_binary(ActionsAsBinary) ->
+          build_scopes(ResourceServerId, [ActionsAsBinary], ResourcePaths)
+       end,
+  map_rich_auth_permissions_to_scopes(ResourceServerId, T, Acc ++ Scopes).
+
+
+build_scopes(ResourceServerId, Actions, Locations) -> lists:flatmap(fun(Action) -> build_scopes_for_action(ResourceServerId, Action, Locations, []) end, Actions).
+
+build_scopes_for_action(ResourceServerId, Action, [Location|Locations], Acc) ->
+  Scope = << ResourceServerId/binary, ".", Action/binary, ":", Location/binary >>,
+  build_scopes_for_action(ResourceServerId, Action, Locations, [ Scope | Acc ] );
+build_scopes_for_action(_, _, [], Acc) -> Acc.
+
+is_legal_permission(#{<<"actions">> := Actions,  <<"locations">> := Locations , <<"type">> := Type }, ResourceServerType) ->
+  case ResourceServerType of
+    <<>> -> false;
+    V when V == Type -> true;
     _ -> false
-  end.
-
-extract_scopes_from_rich_auth_permissions(Acc, []) -> Acc;
-extract_scopes_from_rich_auth_permissions(Acc, [H | T]) ->
-    Locations = lists:filter(fun(L) -> cluster_matches_resource_server_id(L) end, extract_locations(H)),
-    Scopes = case maps:get(H, <<"actions">>, undefined) of
-               undefined -> [];
-               ActionsAsList when is_list(ActionsAsList) ->
-                  build_scopes(ActionsAsList, Locations);
-               ActionsAsBinary when is_binary(ActionsAsBinary) ->
-                  build_scopes([ActionsAsBinary], Locations)
-               end,
-    extract_scopes_from_rich_auth_permissions(Acc ++ Scopes, T);
-extract_scopes_from_rich_auth_permissions(Acc, [_ | T]) ->
-    extract_scopes_from_rich_auth_permissions(Acc, T).
-
-build_scopes_for_action(Action, Locations) -> build_scopes_for_action(Action, Locations, []);
-build_scopes_for_action(Action, [L|Locations], Acc) when is_binary(L) -> build_scopes_for_action(Action, Locations, Acc ++ <<?RESOURCE_SERVER_ID, ".", Action, ":", L>> ).
-build_scopes(Actions, Locations) -> lists:flatmap(fun(A) -> build_scopes_for_action(A, Locations) end, Actions).
+  end;
+is_legal_permission(_, _) -> false.
 
 
 
 -spec post_process_payload_in_rich_auth_request_format(Payload :: map()) -> map().
 %% https://oauth.net/2/rich-authorization-requests/
 post_process_payload_in_rich_auth_request_format(#{<<"authorization_details">> := Permissions} = Payload) ->
-    FilteredPermissionsByType = lists:filter(fun(P) -> permission_type_matches_resource_server_type(P) end, Permissions),
-    AdditionalScopes = extract_scopes_from_rich_auth_permissions(FilteredPermissionsByType),
+    ResourceServerId = rabbit_data_coercion:to_binary(application:get_env(?APP, ?RESOURCE_SERVER_ID, <<>>)),
+    ResourceServerType = rabbit_data_coercion:to_binary(application:get_env(?APP, ?RESOURCE_SERVER_TYPE, <<>>)),
+
+    FilteredPermissionsByType = lists:filter(fun(P) -> is_legal_permission(P, ResourceServerType) end, Permissions),
+    AdditionalScopes = map_rich_auth_permissions_to_scopes(ResourceServerId, FilteredPermissionsByType),
+
     ExistingScopes = maps:get(?SCOPE_JWT_FIELD, Payload),
     maps:put(?SCOPE_JWT_FIELD, AdditionalScopes ++ ExistingScopes, Payload).
 
-permission_type_matches_resource_server_type(Permission) ->
-  case application:get_env(?APP, ?RESOURCE_SERVER_TYPE, undefined) of
-    undefined -> false;
-    ResourceServerTypeAsBinary when is_binary(ResourceServerTypeAsBinary) ->
-      case maps:get(<<"type">>, Permission, undefined) of
-        TypeAsBinary when is_binary(TypeAsBinary) -> TypeAsBinary == ResourceServerTypeAsBinary;
-        _ -> false
-      end
-  end.
 
 
 validate_payload(#{?SCOPE_JWT_FIELD := _Scope, ?AUD_JWT_FIELD := _Aud} = DecodedToken) ->
