@@ -333,13 +333,15 @@ extract_scopes_from_keycloak_permissions(Acc, [_ | T]) ->
     extract_scopes_from_keycloak_permissions(Acc, T).
 
 
-put_location_attribute(Attribute,Map) -> put_location_attribute(binary:split(Attribute, <<":">>, [global]), Map);
-put_location_attribute([K|V], Map) when lists:member(K, ?LOCATION_ATTRIBUTES) ->  maps:put(K, V, Map), Map;
-put_location_attribute([K], Map) -> Map;
-put_location_attribute([], Map) -> Map.
+put_location_attribute(Attribute, Map) when is_binary(Attribute) -> put_location_attribute(binary:split(Attribute, <<":">>, [global, trim_all]), Map);
+%put_location_attribute([Key, Value | _], Map) when lists:member(Key, ?LOCATION_ATTRIBUTES) ->  maps:put(Key, Value, Map), Map;
+put_location_attribute([Key, Value | _], Map) ->  maps:put(Key, Value, Map), Map;
+put_location_attribute(_, Map) -> Map.
 
+% convert [ <<"cluster:A">>, <<"vhost:B" >>, <<"A">>, <<"unknown:C">> ] to #{ <<"cluster">> : <<"A">>, <<"vhost">> : <<"B">> }
+% filtering out non-key-value-pairs and keys which are not part of LOCATION_ATTRIBUTES
 location_attribute_list_to_location_attribute_map(L) -> location_attribute_list_to_location_attribute_map(L, #{});
-location_attribute_list_to_location_attribute_map([H|L],Map) -> location_attribute_list_to_location_attribute_map(L, put_location_attribute(H,Map));
+location_attribute_list_to_location_attribute_map([H|L],Map) when is_binary(H) -> location_attribute_list_to_location_attribute_map(L, put_location_attribute(H,Map));
 location_attribute_list_to_location_attribute_map([], Map) -> Map.
 
 build_location(Map) ->
@@ -363,9 +365,9 @@ extract_locations(P) ->
   case Locations of
     undefined -> [];
     LocationsAsList when is_list(LocationsAsList) ->
-        lists:map(fun(Location) -> parse_and_put_locations_attribute(binary:split(Location,<<"/">>,[global])) end, LocationsAsList);
+        lists:map(fun(Location) -> build_location(location_attribute_list_to_location_attribute_map(binary:split(Location,<<"/">>,[global,trim_all]))) end, LocationsAsList);
     LocationsAsBinary when is_binary(LocationsAsBinary) ->
-        [parse_and_put_locations_attribute(binary:split(Location,<<"/">>,[global]))]
+        [build_location(location_attribute_list_to_location_attribute_map(binary:split(Location,<<"/">>,[global,trim_all])))]
   end.
 
 cluster_matches_resource_server_id(Location) ->
@@ -388,10 +390,10 @@ extract_scopes_from_rich_auth_permissions(Acc, [H | T]) ->
 extract_scopes_from_rich_auth_permissions(Acc, [_ | T]) ->
     extract_scopes_from_rich_auth_permissions(Acc, T).
 
+build_scopes_for_action(Action, Locations) -> build_scopes_for_action(Action, Locations, []);
+build_scopes_for_action(Action, [L|Locations], Acc) when is_binary(L) -> build_scopes_for_action(Action, Locations, Acc ++ <<?RESOURCE_SERVER_ID, ".", Action, ":", L>> ).
 build_scopes(Actions, Locations) -> lists:flatmap(fun(A) -> build_scopes_for_action(A, Locations) end, Actions).
 
-build_scopes_for_action(Action, Locations) -> build_scopes_for_action(Action, Locations, []);
-build_scopes_for_action(Action, [L/binary|Locations], Acc) -> build_scopes_for_action(Action, Locations, Acc ++ <<?RESOURCE_SERVER_ID, ".", Action, ":", L>> ).
 
 
 -spec post_process_payload_in_rich_auth_request_format(Payload :: map()) -> map().
