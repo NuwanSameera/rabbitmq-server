@@ -47,7 +47,7 @@
 
 -define(AUD_JWT_FIELD, <<"aud">>).
 -define(SCOPE_JWT_FIELD, <<"scope">>).
-
+-define(LOCATION_ATTRIBUTES, [<<"cluster">>, <<"vhost">>, <<"queue">>, <<"exchange">>, <<"routing-key>>" ]).
 %%
 %% API
 %%
@@ -333,17 +333,76 @@ extract_scopes_from_keycloak_permissions(Acc, [_ | T]) ->
     extract_scopes_from_keycloak_permissions(Acc, T).
 
 
+put_location_attribute(Attribute,Map) -> put_location_attribute(binary:split(Attribute, <<":">>, [global]), Map);
+put_location_attribute([K|V], Map) when lists:member(K, ?LOCATION_ATTRIBUTES) ->  maps:put(K, V, Map), Map;
+put_location_attribute([K], Map) -> Map;
+put_location_attribute([], Map) -> Map.
+
+location_attribute_list_to_location_attribute_map(L) -> location_attribute_list_to_location_attribute_map(L, #{});
+location_attribute_list_to_location_attribute_map([H|L],Map) -> location_attribute_list_to_location_attribute_map(L, put_location_attribute(H,Map));
+location_attribute_list_to_location_attribute_map([], Map) -> Map.
+
+build_location(Map) ->
+  Vhost = maps:get(Map, <<"vhost">>, <<"*">>),
+  Queue = maps:get(Map, <<"queue">>, <<"*">>),
+  Exchange = maps:get(Map, <<"exchange">>, <<"*">>),
+  RoutingKey = maps:get(Map, <<"routing-key">>, <<"*">>),
+
+  Resource = case Queue of
+     <<"*">> ->  Exchange;
+     _ -> case Exchange of
+                <<"*">> -> Queue;
+                _ -> {refused, rabbit_misc:format("It is not allowed to specify queue [~p] and exchange [~p] on a location [~p]", [queue, exchange, location])}
+              end
+      end,
+  % make sure that Resource is not error
+  <<Vhost/binary,"/",Resource/binary,"/",RoutingKey/binary>>.
+
+extract_locations(P) ->
+  Locations = maps:get(P, <<"locations">>, undefined),
+  case Locations of
+    undefined -> [];
+    LocationsAsList when is_list(LocationsAsList) ->
+        lists:map(fun(Location) -> parse_and_put_locations_attribute(binary:split(Location,<<"/">>,[global])) end, LocationsAsList);
+    LocationsAsBinary when is_binary(LocationsAsBinary) ->
+        [parse_and_put_locations_attribute(binary:split(Location,<<"/">>,[global]))]
+  end.
+
+cluster_matches_resource_server_id(Location) ->
+  case maps:get(Location, <<"cluster">>, undefined) of
+    ?RESOURCE_SERVER_ID -> true;
+    _ -> false
+  end.
+
+extract_scopes_from_rich_auth_permissions(Acc, []) -> Acc;
+extract_scopes_from_rich_auth_permissions(Acc, [H | T]) ->
+    Locations = lists:filter(fun(L) -> cluster_matches_resource_server_id(L) end, extract_locations(H)),
+    Scopes = case maps:get(H, <<"actions">>, undefined) of
+               undefined -> [];
+               ActionsAsList when is_list(ActionsAsList) ->
+                  build_scopes(ActionsAsList, Locations);
+               ActionsAsBinary when is_binary(ActionsAsBinary) ->
+                  build_scopes([ActionsAsBinary], Locations)
+               end,
+    extract_scopes_from_rich_auth_permissions(Acc ++ Scopes, T);
+extract_scopes_from_rich_auth_permissions(Acc, [_ | T]) ->
+    extract_scopes_from_rich_auth_permissions(Acc, T).
+
+build_scopes(Actions, Locations) -> lists:flatmap(fun(A) -> build_scopes_for_action(A, Locations) end, Actions).
+
+build_scopes_for_action(Action, Locations) -> build_scopes_for_action(Action, Locations, []);
+build_scopes_for_action(Action, [L/binary|Locations], Acc) -> build_scopes_for_action(Action, Locations, Acc ++ <<?RESOURCE_SERVER_ID, ".", Action, ":", L>> ).
+
+
 -spec post_process_payload_in_rich_auth_request_format(Payload :: map()) -> map().
 %% https://oauth.net/2/rich-authorization-requests/
 post_process_payload_in_rich_auth_request_format(#{<<"authorization_details">> := Permissions} = Payload) ->
-    rabbit_log:error("Received Permisions: '~s'",[Permissions]),
-    Rich_auth_permission_for_rabbitmq = fun(P) -> rich_auth_permission_for_rabbitmq(P) end,
-    Filtered_Permissions = lists:filter(Rich_auth_permission_for_rabbitmq, Permissions),
-    AdditionalScopes = [ ],
+    FilteredPermissionsByType = lists:filter(fun(P) -> permission_type_matches_resource_server_type(P) end, Permissions),
+    AdditionalScopes = extract_scopes_from_rich_auth_permissions(FilteredPermissionsByType),
     ExistingScopes = maps:get(?SCOPE_JWT_FIELD, Payload),
     maps:put(?SCOPE_JWT_FIELD, AdditionalScopes ++ ExistingScopes, Payload).
 
-rich_auth_permission_for_rabbitmq(Permission) ->
+permission_type_matches_resource_server_type(Permission) ->
   case application:get_env(?APP, ?RESOURCE_SERVER_TYPE, undefined) of
     undefined -> false;
     ResourceServerTypeAsBinary when is_binary(ResourceServerTypeAsBinary) ->
@@ -352,6 +411,7 @@ rich_auth_permission_for_rabbitmq(Permission) ->
         _ -> false
       end
   end.
+
 
 validate_payload(#{?SCOPE_JWT_FIELD := _Scope, ?AUD_JWT_FIELD := _Aud} = DecodedToken) ->
     ResourceServerEnv = application:get_env(?APP, ?RESOURCE_SERVER_ID, <<>>),
