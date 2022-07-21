@@ -459,6 +459,8 @@ list() ->
               Acc ++ list_on_node(Node)
       end, [], rabbit_nodes:all_running()).
 
+
+
 -spec count() -> non_neg_integer().
 
 count() ->
