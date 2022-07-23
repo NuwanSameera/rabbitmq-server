@@ -41,9 +41,7 @@ delete_resource(ReqData, Context) ->
     end,
     {true, ReqData, Context}.
 
-
 close_single_connection(Data, ReqData) ->
-    
     case Data of
         #tracked_connection{name = Name, pid = Pid, username = Username, type = Type} ->
             Conn =  [{name, Name}, {pid, Pid}, {user, Username}, {type, Type}],
@@ -70,7 +68,7 @@ is_authorized(ReqData, Context) ->
 %%--------------------------------------------------------------------
 
 conn(ReqData) ->
-    List = rabbit_connection_tracking:list_by_username(rabbit_mgmt_util:id(username, ReqData)).
+    rabbit_connection_tracking:list_by_username(rabbit_mgmt_util:id(username, ReqData)).
 
 force_close_connection(ReqData, Conn, Pid) ->
     Reason = case cowboy_req:header(<<"x-reason">>, ReqData) of
