@@ -8,7 +8,7 @@
 -module(rabbit_mgmt_wm_connection_user_name).
 
 -export([init/2, to_json/2, resource_exists/2, content_types_provided/2,
-         is_authorized/2, allowed_methods/2, delete_resource/2, conn/1]).
+         is_authorized/2, allowed_methods/2, delete_resource/2, connections/1]).
 -export([variances/2]).
 
 -include_lib("rabbitmq_management_agent/include/rabbit_mgmt_records.hrl").
@@ -63,7 +63,7 @@ close_single_connection(Data, ReqData) ->
 
 is_authorized(ReqData, Context) ->
     try
-        rabbit_mgmt_util:is_authorized_user(ReqData, Context, conn(ReqData))
+        rabbit_mgmt_util:is_authorized_user(ReqData, Context, connections(ReqData))
     catch
         {error, invalid_range_parameters, Reason} ->
             rabbit_mgmt_util:bad_request(iolist_to_binary(Reason), ReqData, Context)
