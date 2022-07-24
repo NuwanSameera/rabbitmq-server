@@ -7,7 +7,7 @@
 
 -module(rabbit_mgmt_wm_connection_user_name).
 
--export([init/2, resource_exists/2, content_types_provided/2,
+-export([init/2, to_json/2, resource_exists/2, content_types_provided/2,
          is_authorized/2, allowed_methods/2, delete_resource/2, conn/1]).
 -export([variances/2]).
 
@@ -29,13 +29,17 @@ allowed_methods(ReqData, Context) ->
     {[<<"HEAD">>, <<"DELETE">>, <<"OPTIONS">>], ReqData, Context}.
 
 resource_exists(ReqData, Context) ->
-    case conn(ReqData) of
+    case connections(ReqData) of
         []    -> {false, ReqData, Context};
         _List -> {true, ReqData, Context}
     end.
 
+to_json(ReqData, Context) ->
+  Connections = rabbit_mgmt_util:filter_tracked_conn_list(connections(ReqData), ReqData, Context),
+  rabbit_mgmt_util:reply_list_or_paginate(Connections, ReqData, Context).
+
 delete_resource(ReqData, Context) ->
-    case conn(ReqData) of
+    case connections(ReqData) of
         []        -> ok;
         List      -> [close_single_connection(Conn, ReqData)|| Conn <- List]
     end,
@@ -67,7 +71,7 @@ is_authorized(ReqData, Context) ->
 
 %%--------------------------------------------------------------------
 
-conn(ReqData) ->
+connections(ReqData) ->
     rabbit_connection_tracking:list_by_username(rabbit_mgmt_util:id(username, ReqData)).
 
 force_close_connection(ReqData, Conn, Pid) ->
