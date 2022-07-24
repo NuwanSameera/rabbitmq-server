@@ -26,7 +26,7 @@ content_types_provided(ReqData, Context) ->
    {rabbit_mgmt_util:responder_map(to_json), ReqData, Context}.
 
 allowed_methods(ReqData, Context) ->
-    {[<<"HEAD">>, <<"DELETE">>, <<"OPTIONS">>], ReqData, Context}.
+    {[<<"HEAD">>, <<"GET">>, <<"DELETE">>, <<"OPTIONS">>], ReqData, Context}.
 
 resource_exists(ReqData, Context) ->
     case connections(ReqData) of
