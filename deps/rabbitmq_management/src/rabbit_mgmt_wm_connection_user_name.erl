@@ -8,7 +8,7 @@
 -module(rabbit_mgmt_wm_connection_user_name).
 
 -export([init/2, to_json/2, content_types_provided/2,
-         is_authorized/2, allowed_methods/2, delete_resource/2, connections/1]).
+  is_authorized/2, allowed_methods/2, delete_resource/2, connections/1]).
 -export([variances/2]).
 
 -include_lib("rabbitmq_management_agent/include/rabbit_mgmt_records.hrl").
@@ -17,67 +17,64 @@
 %%--------------------------------------------------------------------
 
 init(Req, _State) ->
-    {cowboy_rest, rabbit_mgmt_headers:set_common_permission_headers(Req, ?MODULE), #context{}}.
+  {cowboy_rest, rabbit_mgmt_headers:set_common_permission_headers(Req, ?MODULE), #context{}}.
 
 variances(Req, Context) ->
-    {[<<"accept-encoding">>, <<"origin">>], Req, Context}.
+  {[<<"accept-encoding">>, <<"origin">>], Req, Context}.
 
 content_types_provided(ReqData, Context) ->
-   {rabbit_mgmt_util:responder_map(to_json), ReqData, Context}.
+  {rabbit_mgmt_util:responder_map(to_json), ReqData, Context}.
 
 allowed_methods(ReqData, Context) ->
-    {[<<"HEAD">>, <<"GET">>, <<"DELETE">>, <<"OPTIONS">>], ReqData, Context}.
+  {[<<"HEAD">>, <<"GET">>, <<"DELETE">>, <<"OPTIONS">>], ReqData, Context}.
 
 to_json(ReqData, Context) ->
   Connections = rabbit_mgmt_util:filter_tracked_conn_list(connections(ReqData), ReqData, Context),
   rabbit_mgmt_util:reply_list_or_paginate(Connections, ReqData, Context).
 
 delete_resource(ReqData, Context) ->
-    case connections(ReqData) of
-        []        -> ok;
-        List      -> [close_single_connection(Conn, ReqData)|| Conn <- List]
-    end,
-    {true, ReqData, Context}.
+  rabbit_networking:close_all_user_connections(rabbit_mgmt_util:id(username, ReqData), "Closed via management plugin"),
+  {true, ReqData, Context}.
 
 close_single_connection(Data, ReqData) ->
-    case Data of
-        #tracked_connection{name = Name, pid = Pid, username = Username, type = Type} ->
-            Conn =  [{name, Name}, {pid, Pid}, {user, Username}, {type, Type}],
+  case Data of
+    #tracked_connection{name = Name, pid = Pid, username = Username, type = Type} ->
+      Conn = [{name, Name}, {pid, Pid}, {user, Username}, {type, Type}],
 
-            case proplists:get_value(pid, Conn) of
-                 undefined -> ok;
- 
-                Pid when is_pid(Pid) ->
-                     force_close_connection(ReqData, Conn, Pid)
-                 end;
+      case proplists:get_value(pid, Conn) of
+        undefined -> ok;
 
-        not_found ->
-            not_found
-    end.    
+        Pid when is_pid(Pid) ->
+          force_close_connection(ReqData, Conn, Pid)
+      end;
+
+    not_found ->
+      not_found
+  end.
 
 is_authorized(ReqData, Context) ->
-    try
-        rabbit_mgmt_util:is_authorized_user(ReqData, Context, connections(ReqData))
-    catch
-        {error, invalid_range_parameters, Reason} ->
-            rabbit_mgmt_util:bad_request(iolist_to_binary(Reason), ReqData, Context)
-    end.
+  try
+    rabbit_mgmt_util:is_authorized_user(ReqData, Context, connections(ReqData))
+  catch
+    {error, invalid_range_parameters, Reason} ->
+      rabbit_mgmt_util:bad_request(iolist_to_binary(Reason), ReqData, Context)
+  end.
 
 %%--------------------------------------------------------------------
 
 connections(ReqData) ->
-    rabbit_connection_tracking:list_of_user(rabbit_mgmt_util:id(username, ReqData)).
+  rabbit_connection_tracking:list_of_user(rabbit_mgmt_util:id(username, ReqData)).
 
 force_close_connection(ReqData, Conn, Pid) ->
-    Reason = case cowboy_req:header(<<"x-reason">>, ReqData) of
-                 undefined -> "Closed via management plugin";
-                 V         -> binary_to_list(V)
-             end,
-            case proplists:get_value(type, Conn) of
-                direct  -> amqp_direct_connection:server_close(Pid, 320, Reason);
-                network -> rabbit_networking:close_connection(Pid, Reason);
-                _       ->
-                    % best effort, this will work for connections to the stream plugin
-                    gen_server:call(Pid, {shutdown, Reason}, infinity)
-            end,
-    ok.
+  Reason = case cowboy_req:header(<<"x-reason">>, ReqData) of
+             undefined -> "Closed via management plugin";
+             V -> binary_to_list(V)
+           end,
+  case proplists:get_value(type, Conn) of
+    direct -> amqp_direct_connection:server_close(Pid, 320, Reason);
+    network -> rabbit_networking:close_connection(Pid, Reason);
+    _ ->
+      % best effort, this will work for connections to the stream plugin
+      gen_server:call(Pid, {shutdown, Reason}, infinity)
+  end,
+  ok.
