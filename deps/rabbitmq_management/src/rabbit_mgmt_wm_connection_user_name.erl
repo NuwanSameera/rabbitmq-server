@@ -29,7 +29,7 @@ allowed_methods(ReqData, Context) ->
     {[<<"HEAD">>, <<"GET">>, <<"DELETE">>, <<"OPTIONS">>], ReqData, Context}.
 
 to_json(ReqData, Context) ->
-  Connections = rabbit_connection_tracking:list_of_user(rabbit_mgmt_util:id(username, ReqData)),
+  Connections = rabbit_mgmt_util:filter_tracked_conn_list(connections(ReqData), ReqData, Context),
   rabbit_mgmt_util:reply_list_or_paginate(Connections, ReqData, Context).
 
 delete_resource(ReqData, Context) ->
@@ -66,7 +66,7 @@ is_authorized(ReqData, Context) ->
 %%--------------------------------------------------------------------
 
 connections(ReqData) ->
-    rabbit_connection_tracking:list_by_username(rabbit_mgmt_util:id(username, ReqData)).
+    rabbit_connection_tracking:list_of_user(rabbit_mgmt_util:id(username, ReqData)).
 
 force_close_connection(ReqData, Conn, Pid) ->
     Reason = case cowboy_req:header(<<"x-reason">>, ReqData) of
