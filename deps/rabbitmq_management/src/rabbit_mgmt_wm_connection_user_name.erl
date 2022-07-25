@@ -7,7 +7,7 @@
 
 -module(rabbit_mgmt_wm_connection_user_name).
 
--export([init/2, to_json/2, resource_exists/2, content_types_provided/2,
+-export([init/2, to_json/2, content_types_provided/2,
          is_authorized/2, allowed_methods/2, delete_resource/2, connections/1]).
 -export([variances/2]).
 
@@ -28,14 +28,8 @@ content_types_provided(ReqData, Context) ->
 allowed_methods(ReqData, Context) ->
     {[<<"HEAD">>, <<"GET">>, <<"DELETE">>, <<"OPTIONS">>], ReqData, Context}.
 
-resource_exists(ReqData, Context) ->
-    case connections(ReqData) of
-        []    -> {false, ReqData, Context};
-        _List -> {true, ReqData, Context}
-    end.
-
 to_json(ReqData, Context) ->
-  Connections = rabbit_mgmt_util:filter_tracked_conn_list(connections(ReqData), ReqData, Context),
+  Connections = rabbit_connection_tracking:list_of_user(rabbit_mgmt_util:id(username, ReqData)),
   rabbit_mgmt_util:reply_list_or_paginate(Connections, ReqData, Context).
 
 delete_resource(ReqData, Context) ->
