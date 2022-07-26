@@ -33,7 +33,10 @@ to_json(ReqData, Context) ->
   rabbit_mgmt_util:reply_list_or_paginate(Connections, ReqData, Context).
 
 delete_resource(ReqData, Context) ->
-  rabbit_networking:close_all_user_connections(rabbit_mgmt_util:id(username, ReqData), "Closed via management plugin"),
+  case connections(ReqData) of
+    [] -> ok;
+    List -> [close_single_connection(Conn, ReqData) || Conn <- List]
+  end,
   {true, ReqData, Context}.
 
 close_single_connection(Data, ReqData) ->
