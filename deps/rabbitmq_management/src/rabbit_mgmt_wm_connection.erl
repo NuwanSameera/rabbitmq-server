@@ -35,16 +35,28 @@ resource_exists(ReqData, Context) ->
     end.
 
 to_json(ReqData, Context) ->
+    to_json(username_qs(ReqData), ReqData, Context).
+
+to_json(undefined, ReqData, Context) ->
     case rabbit_mgmt_util:disable_stats(ReqData) of
         false ->
-            rabbit_mgmt_util:reply(
-              maps:from_list(rabbit_mgmt_format:strip_pids(conn_stats(ReqData))), ReqData, Context);
+            ConnStats = conn_stats(ReqData),
+            ConnStatsWithoutPids = rabbit_mgmt_format:strip_pids(ConnStats),
+            ReplyData = maps:from_list(ConnStatsWithoutPids), 
+            rabbit_mgmt_util:reply(ReplyData, ReqData, Context);
         true ->
-            rabbit_mgmt_util:reply([{name, rabbit_mgmt_util:id(connection, ReqData)}],
-                                   ReqData, Context)
-    end.
+            ReplyData = [{name, rabbit_mgmt_util:id(connection, ReqData)}],
+            rabbit_mgmt_util:reply(ReplyData, ReqData, Context)
+    end;
+to_json(Username, ReqData, Context) ->
+    UserConnections = list_user_connections(Username),
+    Connections = rabbit_mgmt_util:filter_tracked_conn_list(UserConnections, ReqData, Context),
+    rabbit_mgmt_util:reply_list_or_paginate(Connections, ReqData, Context).
 
 delete_resource(ReqData, Context) ->
+    delete_resource(username_qs(ReqData), ReqData, Context).
+
+delete_resource(undefined, ReqData, Context) ->
     case conn(ReqData) of
         not_found -> ok;
         Conn      ->
@@ -53,6 +65,12 @@ delete_resource(ReqData, Context) ->
                 Pid when is_pid(Pid) ->
                     force_close_connection(ReqData, Conn, Pid)
             end
+    end,
+    {true, ReqData, Context};
+delete_resource(Username, ReqData, Context) ->
+    case list_user_connections(Username) of
+        [] -> ok;
+        List -> [close_single_connection(Conn, ReqData) || Conn <- List]
     end,
     {true, ReqData, Context}.
 
@@ -65,6 +83,9 @@ is_authorized(ReqData, Context) ->
     end.
 
 %%--------------------------------------------------------------------
+
+username_qs(ReqData) ->
+    rabbit_mgmt_util:qs_val(<<"username">>, ReqData).
 
 conn(ReqData) ->
     case rabbit_mgmt_util:disable_stats(ReqData) of
@@ -82,6 +103,8 @@ conn(ReqData) ->
 conn_stats(ReqData) ->
     rabbit_mgmt_db:get_connection(rabbit_mgmt_util:id(connection, ReqData),
                                   rabbit_mgmt_util:range_ceil(ReqData)).
+list_user_connections(Username) ->
+    rabbit_connection_tracking:list_of_user(Username).
 
 force_close_connection(ReqData, Conn, Pid) ->
     Reason = case cowboy_req:header(<<"x-reason">>, ReqData) of
@@ -96,3 +119,19 @@ force_close_connection(ReqData, Conn, Pid) ->
                     gen_server:call(Pid, {shutdown, Reason}, infinity)
             end,
     ok.
+
+close_single_connection(Data, ReqData) ->
+  case Data of
+    #tracked_connection{name = Name, pid = Pid, username = Username, type = Type} ->
+      Conn = [{name, Name}, {pid, Pid}, {user, Username}, {type, Type}],
+
+      case proplists:get_value(pid, Conn) of
+        undefined -> ok;
+
+        Pid when is_pid(Pid) ->
+          force_close_connection(ReqData, Conn, Pid)
+      end;
+
+    not_found ->
+      not_found
+  end.

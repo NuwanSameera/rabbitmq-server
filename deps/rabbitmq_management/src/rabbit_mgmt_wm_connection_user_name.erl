@@ -66,7 +66,7 @@ is_authorized(ReqData, Context) ->
 %%--------------------------------------------------------------------
 
 connections(ReqData) ->
-  rabbit_connection_tracking:list_of_user(rabbit_mgmt_util:id(username, ReqData)).
+    rabbit_connection_tracking:list_of_user(rabbit_mgmt_util:id(username, ReqData)).
 
 force_close_connection(ReqData, Conn, Pid) ->
   Reason = case cowboy_req:header(<<"x-reason">>, ReqData) of
