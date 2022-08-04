@@ -336,10 +336,11 @@ vary: accept, accept-encoding, origin</pre>
         <td></td>
         <td>X</td>
         <td></td>
-        <td class="path">/api/connections/username/<i>username</i></td>
+        <td class="path">/api/connections?username=<i>username</i></td>
         <td>
-          A list of all open connections in a specific username. Use pagination parameters to filter connections.
-          DELETEing it will close the all connections in a username. Optionally set the
+          A list of all open connections for a specific username given by query parameter.
+          Use pagination parameters to filter connections.
+          DELETEing it will close all connections for the given username. Optionally set the
           "X-Reason" header when DELETEing to provide a reason.
         </td>
       </tr>
