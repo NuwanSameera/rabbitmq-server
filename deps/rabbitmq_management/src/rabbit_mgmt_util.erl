@@ -49,6 +49,8 @@
 
 -export([disable_stats/1, enable_queue_totals/1]).
 
+-export([force_close_connection/3]).
+
 -import(rabbit_misc, [pget/2]).
 
 -include("rabbit_mgmt.hrl").
@@ -1235,3 +1237,19 @@ catch_no_such_user_or_vhost(Fun, Replacement) ->
 %% error is thrown when the request is out of range
 sublist(List, S, L) when is_integer(L), L >= 0 ->
     lists:sublist(lists:nthtail(S-1, List), L).
+
+force_close_connection(ReqData, Conn, Pid) ->
+    Reason = case cowboy_req:header(<<"x-reason">>, ReqData) of
+                 undefined -> "Closed via management plugin";
+                 V         -> binary_to_list(V)
+             end,
+    case proplists:get_value(type, Conn) of
+        direct  ->
+            amqp_direct_connection:server_close(Pid, 320, Reason);
+        network ->
+            rabbit_networking:close_connection(Pid, Reason);
+        _       ->
+            % best effort, this will work for connections to the stream plugin
+            gen_server:cast(Pid, {shutdown, Reason})
+    end,
+    ok.
